@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 
+import hashlib
 import struct
 from argparse import ArgumentParser
 from pathlib import Path
@@ -32,10 +33,54 @@ def to_int(s) -> int:
     return int(s, 16) if s.startswith('0x') else int(s)
 
 
+def verify_input_fingerprint(path: str, config: DeviceConfig) -> None:
+    expected = config.get('EXPECTED_LK_SHA256')
+    if expected is None:
+        return
+
+    expected = expected.strip().strip('"').lower()
+    actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    if actual != expected:
+        exit(
+            "ERROR: Wrong LK image for this device config "
+            "(expected SHA-256 %s, got %s)" % (expected, actual)
+        )
+
+
 def encode_bl(src, dst):
     off = dst - (src + 4)
     hi, lo = (off >> 12) & 0x7FF, (off >> 1) & 0x7FF
     return struct.pack('<HH', 0xF000 | hi, 0xF800 | lo)
+
+
+def require_gale_anchors(partition: LkPartition, config: DeviceConfig) -> None:
+    if config.get('XIAOMI_GALE') != 'y':
+        return
+
+    anchors = {
+        'root-of-trust lock-state': bytes.fromhex(
+            '00 28 40 F0 8C 80 20 46 4F F4 80 71 32 46 52 F0 '
+            '1B FB 00 28 7A D1 40 46 4C F0 02 FE 00 28 6C D1'
+        ),
+        'get_vfy_policy': bytes.fromhex('08 B5 FF F7 63 FF C0 F3'),
+        'get_dl_policy': bytes.fromhex('08 B5 FF F7 5D FF 00 F0'),
+        'avb allow-error': bytes.fromhex('05 F0 01 03 83 F0 01 0A 0D 93 70 9B'),
+        'load_and_verify_vbmeta': bytes.fromhex('7F F4 6B AE 88 E6 DD F8'),
+        'platform-init env-ready': bytes.fromhex('00 22 00 23 66 E9 02 23'),
+        'cmdline_pre_process': bytes.fromhex('2D E9 F0 47 FF F7 A6 FF'),
+    }
+    missing = [name for name, pattern in anchors.items()
+               if partition.data.count(pattern) != 1]
+    if missing:
+        exit('ERROR: Gale required LK anchor mismatch: %s' % ', '.join(missing))
+
+
+def require_gale_app_call(partition: LkPartition, config: DeviceConfig) -> None:
+    if config.get('XIAOMI_GALE') != 'y':
+        return
+
+    if partition.data.count(bytes.fromhex('FF F7 E2 FB 00 20 61 4C')) != 1:
+        exit('ERROR: Gale app() call anchor mismatch')
 
 
 def patch_bss(
@@ -168,8 +213,9 @@ def main() -> None:
         if not Path(path).is_file():
             exit("ERROR: File not found: '%s'!" % path)
 
-    lk = LkImage(args.input)
     config = DeviceConfig(args.config)
+    verify_input_fingerprint(args.input, config)
+    lk = LkImage(args.input)
     device = Path(args.config).name.removesuffix('_defconfig')
 
     base = to_int(config.get('BOOTLOADER_BASE'))
@@ -194,6 +240,9 @@ def main() -> None:
     # If this happens, it probably means we're trying to build for
     # an incompatible LK image, so bail out.
     assert part.lk_address == base, 'Wrong load address for LK partition (expected 0x%X, got 0x%X)' % (base, part.lk_address)
+    assert len(part.data) == size, 'Wrong LK partition size (expected 0x%X, got 0x%X)' % (size, len(part.data))
+    require_gale_anchors(part, config)
+    require_gale_app_call(part, config)
 
     payload = open(args.payload, 'rb').read()
     payload_size = len(payload)
