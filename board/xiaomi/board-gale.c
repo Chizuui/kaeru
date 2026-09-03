@@ -52,6 +52,7 @@ static void __attribute__((naked)) cmdline_pre_process_hook(void) {
 }
 
 static uint32_t load_and_verify_vbmeta_addr = 0;
+static volatile uint32_t vbmeta_bypass_cont = 0;
 
 static int get_root_of_trust_lock_state(uint32_t *lock_state) {
     bool locked = is_spoofing_enabled() && get_bootmode() == BOOTMODE_NORMAL;
@@ -74,8 +75,9 @@ static void __attribute__((naked)) optional_vbmeta_bypass_hook(void) {
         "push {r0-r3, r12, lr}\n"
         "bl apply_optional_vbmeta_bypass\n"
         "pop {r0-r3, r12, lr}\n"
-        "movw ip, #0x12C1\n"
-        "movt ip, #0x4C47\n"
+        "movw ip, #:lower16:vbmeta_bypass_cont\n"
+        "movt ip, #:upper16:vbmeta_bypass_cont\n"
+        "ldr ip, [ip]\n"
         "bx ip\n"
     );
 }
@@ -128,6 +130,7 @@ void board_early_init(void) {
     uint32_t hook_addr = platform_init_hook_base + 8;
     printf("Found platform_init env ready point at 0x%08X, hooking...\n",
            hook_addr);
+    vbmeta_bypass_cont = DECODE_BL_TARGET(hook_addr) | 1;
     PATCH_CALL(hook_addr, (void *)optional_vbmeta_bypass_hook, TARGET_THUMB);
 
     printf("Found cmdline_pre_process at 0x%08X\n", cmdline_pre_process_addr);
