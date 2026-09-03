@@ -19,21 +19,6 @@ void kaeru_late_init(void) {
 }
 
 static int redirect_direct_app_calls(void) {
-#ifdef CONFIG_XIAOMI_GALE
-    uint32_t app_call = SEARCH_PATTERN(
-        CONFIG_BOOTLOADER_BASE,
-        CONFIG_BOOTLOADER_BASE + CONFIG_BOOTLOADER_SIZE,
-        0xF7FF, 0xFBE2, 0x2000, 0x4C61);
-
-    if (!app_call || (DECODE_BL_TARGET(app_call) & ~1) != CONFIG_APP_ADDRESS) {
-        printf("ERROR: Gale app() call anchor not found.\n");
-        return 0;
-    }
-
-    PATCH_CALL(app_call, (void *)kaeru_late_init, TARGET_THUMB);
-    printf("Redirected Gale app() call at 0x%08X to kaeru_late_init\n", app_call);
-    return 1;
-#else
     uint32_t start = CONFIG_BOOTLOADER_BASE;
     uint32_t end = CONFIG_BOOTLOADER_BASE + CONFIG_BOOTLOADER_SIZE;
     uint32_t app_addr = CONFIG_APP_ADDRESS & ~1;
@@ -54,7 +39,6 @@ static int redirect_direct_app_calls(void) {
     }
 
     return count;
-#endif
 }
 
 void kaeru_early_init(void) {
@@ -80,7 +64,7 @@ void kaeru_early_init(void) {
         *(volatile uint32_t*)ptr_addr = (uint32_t)kaeru_late_init | 1;
         arch_clean_cache_range(ptr_addr, 4);
     } else if (redirect_direct_app_calls() > 0) {
-        // No '.apps' table entry; Gale direct app() call was redirected.
+        // No '.apps' table entry; direct app() call was redirected.
     } else {
         printf("Failed to patch mt_init_boot() pointer\n");
         printf("kaeru won't be able to run its late init!\n");

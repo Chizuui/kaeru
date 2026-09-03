@@ -394,12 +394,11 @@ menu "Image Patching"
         bool "Enable certificate bypass"
         default n
         help
-          Say Y to re-sign the partitions modified during injection so the
-          patched image passes the bootloader's certificate verification on
-          SBC enabled devices.
+          Say Y to attempt a cert2 bypass for partitions modified during
+          injection. This does not create a vendor-valid signature; target
+          preloader compatibility must be verified independently.
 
-          This has no effect on images that don't carry a cert2, so it is
-          safe to leave enabled.
+          This has no effect on images that don't carry a cert2.
 
     config CERT_BYPASS_MODE
         string "Certificate bypass strategy"
