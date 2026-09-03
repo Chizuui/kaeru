@@ -29,9 +29,19 @@ Build dengan LK stok yang tepat:
 ./build.sh gale /path/to/lk.img
 ```
 
-Output preflight harus memuat LK base, LK size, platform-init caller, payload destination, serta partisi `lk` yang ditandatangani ulang saat `CONFIG_CERT_BYPASS=y`.
+Output preflight harus memuat LK base, LK size, platform-init caller, payload destination, serta cert2 hash-override bypass untuk `lk` yang diubah saat `CONFIG_CERT_BYPASS=y`. Ini bukan tanda tangan valid dari vendor.
 
 Jangan flash saat validasi source. Simpan LK asli dan jalur recovery sebelum pengujian perangkat.
+
+## Verifikasi preloader
+
+Preloader memuat partisi bernama sebelum menyerahkan kontrol ke LK. Untuk LK, IDA menelusuri:
+
+```text
+sub_2315C → sub_2A80C → sub_38478 → sub_38738
+```
+
+`sub_2A80C` memeriksa `img_auth_required`; saat aktif, `sub_38478` memverifikasi rantai sertifikat dan `sub_38738` memverifikasi autentikasi image. Status unlocked sendiri tidak mematikan verifikasi LK. Gale membutuhkan `CONFIG_CERT_BYPASS=y`, `CONFIG_CERT_BYPASS_MODE="override"`, dan cert2 `lk` yang dapat diparse. `utils/patch.py` menolak build jika `lk` yang diubah tidak tercakup.
 
 ## Perilaku
 

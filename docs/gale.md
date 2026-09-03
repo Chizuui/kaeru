@@ -29,9 +29,19 @@ Build against exact stock LK:
 ./build.sh gale /path/to/lk.img
 ```
 
-Expected preflight output includes LK base, LK size, platform-init caller, payload destination, and a re-signed modified `lk` partition when `CONFIG_CERT_BYPASS=y`.
+Expected preflight output includes LK base, LK size, platform-init caller, payload destination, and a cert2 hash-override bypass for modified `lk` when `CONFIG_CERT_BYPASS=y`. This is not a vendor-valid signature.
 
 Do not flash as part of source validation. Keep original LK and a recovery path before any device test.
+
+## Preloader verification
+
+Preloader loads named partitions before handing control to LK. For LK, IDA traced:
+
+```text
+sub_2315C → sub_2A80C → sub_38478 → sub_38738
+```
+
+`sub_2A80C` checks `img_auth_required`; when set, `sub_38478` verifies the certificate chain and `sub_38738` verifies image authentication. Unlocked state does not by itself disable LK verification. Gale therefore requires `CONFIG_CERT_BYPASS=y`, `CONFIG_CERT_BYPASS_MODE="override"`, and a parsable `lk` cert2. `utils/patch.py` rejects the build if modified `lk` is not covered.
 
 ## Behavior
 

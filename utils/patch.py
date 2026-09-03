@@ -243,6 +243,8 @@ def main() -> None:
     assert len(part.data) == size, 'Wrong LK partition size (expected 0x%X, got 0x%X)' % (size, len(part.data))
     require_gale_anchors(part, config)
     require_gale_app_call(part, config)
+    if config.get('XIAOMI_GALE') == 'y' and config.get('CERT_BYPASS') != 'y':
+        exit('ERROR: Gale requires CONFIG_CERT_BYPASS=y for preloader LK verification')
 
     payload = open(args.payload, 'rb').read()
     payload_size = len(payload)
@@ -331,7 +333,9 @@ def main() -> None:
         mode = resolve_cert_bypass_mode(config)
         signed = apply_cert_bypass(lk, mode)
         if not signed:
-            print('No partitions required re-signing (no cert2 present?)')
+            print('No partitions required cert2 hash-override bypass')
+        if config.get('XIAOMI_GALE') == 'y' and 'lk' not in [name.lower() for name in signed]:
+            exit('ERROR: Gale lk partition was not covered by cert2 hash-override bypass')
 
     lk._rebuild_contents()
     lk.save(args.output if args.output else ('%s-patched.bin' % device))

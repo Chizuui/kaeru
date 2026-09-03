@@ -29,9 +29,19 @@ sudo apt-get install gcc-arm-linux-gnueabihf python3 python3-pip git make
 ./build.sh gale /path/to/lk.img
 ```
 
-预检输出应包含 LK base、LK size、platform-init caller、payload destination；当 `CONFIG_CERT_BYPASS=y` 时，还应显示已重新签名的 `lk` 分区。
+预检输出应包含 LK base、LK size、platform-init caller、payload destination；当 `CONFIG_CERT_BYPASS=y` 时，还应显示已对修改后的 `lk` 使用 cert2 hash-override bypass。这不是厂商有效签名。
 
 不要在源码验证阶段刷写。进行设备测试前，保留原始 LK 和恢复路径。
+
+## Preloader 验证
+
+Preloader 在交接控制权给 LK 前加载命名分区。针对 LK，IDA 追踪到：
+
+```text
+sub_2315C → sub_2A80C → sub_38478 → sub_38738
+```
+
+`sub_2A80C` 检查 `img_auth_required`；启用时，`sub_38478` 验证证书链，`sub_38738` 验证 image authentication。仅处于 unlocked 状态不会自动关闭 LK 验证。因此 Gale 需要 `CONFIG_CERT_BYPASS=y`、`CONFIG_CERT_BYPASS_MODE="override"`，以及可解析 cert2 的 `lk`。如果修改后的 `lk` 未被覆盖，`utils/patch.py` 会拒绝构建。
 
 ## 行为
 
