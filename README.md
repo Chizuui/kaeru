@@ -30,6 +30,13 @@ An elaborate wiki with multiple guides and notes has been provided to help you u
 4. [Porting kaeru to a new device](https://github.com/R0rt1z2/kaeru/wiki/Porting-kaeru-to-a-new-device)
 5. [Customization and kaeru APIs](https://github.com/R0rt1z2/kaeru/wiki/Customization-and-kaeru-APIs)
 
+## Device notes
+
+Per-device porting notes live in [`docs/`](./docs). Each document records how that
+device's offsets were derived, plus anything still missing from its port.
+
+- [`docs/gale.md`](./docs/gale.md) — Redmi 13C (`gale`, MT6768)
+
 ## License
 
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.

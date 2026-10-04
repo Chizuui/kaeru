@@ -63,3 +63,11 @@ config XIAOMI_LIGHT
     default n
     help
       Say Y if you want to include support for POCO M4 5G / Redmi 10 5G / Redmi 11 Prime 5G / Redmi Note 11E/11R
+
+config XIAOMI_GALE
+    bool "Support Redmi 13C (gale)"
+    default n
+    help
+      Say Y if you want to include support for Redmi 13C (gale).
+      See configs/xiaomi/gale_defconfig for the LK offsets, all of which were
+      derived from this device's own lk.img rather than copied from another board.

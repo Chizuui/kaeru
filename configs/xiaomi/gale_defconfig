@@ -1,0 +1,104 @@
+# Redmi 13C (gale) — MediaTek MT6768
+#
+# Every address below was derived from THIS device's own lk.img, not copied from
+# another board. Load base and size in particular were triple-checked, because
+# utils/parse.py's get_load_addr() picks the wrong word for this image:
+#
+#   * the LK descriptor at EA 0x6c is { bx r0 ; 0x4C400020 ; 0x4C400000 ;
+#     0x4C573C00 ; 0x4C400080 }, and 0x4C573C00 - 0x4C400000 == 0x173C00 which is
+#     exactly the size word in the image header, so the base is 0x4C400000 and
+#     0x4C400020 is a data address *inside* LK.
+#   * the Thumb literal at EA 0x42a4 holds 0x76e20 and is consumed by
+#     `LDR.W r0,[pc,#..] ; ADD r0,pc`, which resolves to 0x4C400000 + 0x7a824
+#     (the "platform_init()\n" string).
+#   * mtk_detect_key lands 4 bytes from the same function on the MT6768 earth LK.
+#
+# Running utils/setup.py on this image yields BASE=0x4C400020 and therefore shifts
+# every address by +0x20. The values here are the corrected ones.
+#
+# Functions confirmed to land exactly on IDA function starts:
+#   fastboot_info 0x4C42B680, fastboot_okay 0x4C42B820, fastboot_publish 0x4C42B22C,
+#   video_printf 0x4C42DA1C, mtk_detect_key 0x4C4054A8, thread_create 0x4C4265C8,
+#   thread_resume 0x4C4267DC, malloc 0x4C4419E0, free 0x4C441114, dprintf 0x4C440CE4,
+#   lk_log_store 0x4C455694, app 0x4C42A9F0 (from the .apps row at EA 0x122E9C).
+
+CONFIG_BOOTLOADER_BASE=0x4C400000
+CONFIG_BOOTLOADER_SIZE=0x173C00
+
+# app() is mt_boot_app; the LK names it "mt_boot", which is why parse.py's "app"
+# patterns do not match. Found via the .apps table row
+# { name="mt_boot", entry=0x4C42A9F1, terminator=0 } at EA 0x122E9C.
+CONFIG_APP_ADDRESS=0x4C42A9F0
+
+# platform_init() prologue (PUSH.W {R4-R11,LR}) and the "platform_init()\n" string.
+# NOTE: on this LK build platform_init() has no caller, see PLATFORM_INIT_CALLER below.
+CONFIG_PLATFORM_INIT_ADDRESS=0x4C4039DC
+
+# The BL that platform_init() uses to call init_storage(), at +0x50 into it.
+CONFIG_INIT_STORAGE_CALLER=0x4C403A0C
+
+# fastboot_continue() stores BOOTMODE_NORMAL into it first; lives in BSS, just past
+# LK_END (0x4C573C00), exactly like the earth board.
+CONFIG_BOOTMODE_ADDRESS=0x4C5765A4
+
+CONFIG_FASTBOOT_REGISTER_ADDRESS=0x4C42B1F0
+CONFIG_FASTBOOT_PUBLISH_ADDRESS=0x4C42B22C
+CONFIG_FASTBOOT_INFO_ADDRESS=0x4C42B680
+CONFIG_FASTBOOT_OKAY_ADDRESS=0x4C42B820
+
+CONFIG_VIDEO_PRINTF_ADDRESS=0x4C42DA1C
+CONFIG_MTK_DETECT_KEY_ADDRESS=0x4C4054A8
+CONFIG_LK_LOG_STORE_ADDRESS=0x4C455694
+CONFIG_THREAD_CREATE_ADDRESS=0x4C4265C8
+CONFIG_THREAD_RESUME_ADDRESS=0x4C4267DC
+CONFIG_MALLOC_ADDRESS=0x4C4419E0
+CONFIG_FREE_ADDRESS=0x4C441114
+CONFIG_DPRINTF_ADDRESS=0x4C440CE4
+
+# LK's own environment accessors, called by lib/environment.c to implement
+# get_env()/set_env(). Without these the `fastboot oem bldr_spoof on|off|status`
+# toggle cannot persist its flag, so the spoof would always read as disabled.
+# get_env prints "[%s]get_env %s from area %d\n"; its signature
+# (B510 4602 4604 4909) is byte-identical to the one board-next_ultra.c uses for
+# get_env, which is a useful independent confirmation.
+CONFIG_GET_ENV_ADDRESS=0x4C45C4E8
+# set_env prints "[%s]set_env %s %s\n" and "invalid parameter in set_env_with_area".
+CONFIG_SET_ENV_ADDRESS=0x4C45C51E
+
+# Cmdline templates rewritten by handle_recovery_boot() when booting recovery, so
+# adbd/fastbootd still see "orange" while the lock state is spoofed as locked.
+# Both live in the verifiedbootstate switcher at 0x4C454758.
+CONFIG_RECOVERY_CMDLINE1_ADDRESS=0x4C516380
+CONFIG_RECOVERY_CMDLINE2_ADDRESS=0x4C5163F4
+
+CONFIG_MEDIATEK_MT6768=y
+CONFIG_XIAOMI_GALE=y
+CONFIG_SPOOF_SUPPORT=y
+CONFIG_RECOVERY_CMDLINE_PATCH=y
+CONFIG_CERT_BYPASS=y
+
+# ── MISSING ON PURPOSE ────────────────────────────────────────────────────────────
+# CONFIG_PLATFORM_INIT_CALLER is intentionally left unset.
+#
+# kaeru defines it as "address of the function that calls platform_init()" and
+# stage1/main.c relies on it being the `bl platform_init` that bootstrap2 executes,
+# so that overwriting it with `bl stage1` diverts the boot into the payload.
+#
+# On this LK that instruction does not exist. platform_init() is present and fully
+# functional (it calls init_storage(), which is why CONFIG_INIT_STORAGE_CALLER is
+# meaningful), but nothing calls it: the boot path enters the .apps table and runs
+# mt_boot_app directly. Verified three independent ways:
+#   * alignment-independent scan of every 2-byte offset for Thumb-2 BL, and every
+#     4-byte offset for ARM BL (0xEBxxxxxx)  -> 0 hits
+#   * platform_init's address as a stored word anywhere in the image      -> 0 hits
+#   * literal-pool load + BLX Rm (indirect) resolving to platform_init    -> 0 hits
+#
+# patch.py aborts with "Invalid basic required configuration" while this is unset,
+# which is the safe outcome: it refuses to emit an image rather than bricking the
+# device by hijacking an unrelated call site.
+#
+# The natural hook for this LK is the .apps entry itself at EA 0x122EA0
+# (runtime 0x4C522EA0), which currently holds 0x4C42A9F1. Overwriting that word
+# with (stage1 | 1) would hand control over before mt_boot_app runs, but that needs
+# a different injection path than the `bl` rewrite patch.py does, plus a stage1 that
+# resumes boot without calling the dead platform_init(). Not implemented here.
