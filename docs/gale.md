@@ -7,8 +7,10 @@ was obtained, and what is still missing.
 > [!CAUTION]
 > Read the [kaeru wiki](https://github.com/R0rt1z2/kaeru/wiki) before flashing
 > anything. Modifying a bootloader can permanently brick the device. These notes
-> describe an **incomplete** port — see [Known blocker](#known-blocker) before
-> attempting a build.
+> describe an **unverified** port: the offsets are derived from this device's own
+> image, but no patched image has been built and booted yet, and two AVB-related
+> patches listed under [Not yet implemented](#not-yet-implemented) are still
+> missing.
 
 ## Device
 
@@ -76,7 +78,7 @@ board. "Exact" means the address coincides with an IDA function start.
 | `BOOTLOADER_SIZE` | `0x173C00` | header word at `0x04` |
 | `APP_ADDRESS` | `0x4C42A9F0` | `.apps` table row, exact |
 | `PLATFORM_INIT_ADDRESS` | `0x4C4039DC` | `PUSH.W {R4-R11,LR}` + `"platform_init()\n"` |
-| `INIT_STORAGE_CALLER` | `0x4C403A0C` | `BL init_storage` at +0x50 into `platform_init` |
+| `INIT_STORAGE_CALLER` | `0x4C403A0C` | `BL init_storage` at +0x30 into `platform_init` |
 | `BOOTMODE_ADDRESS` | `0x4C5765A4` | written by `fastboot_continue`, in BSS |
 | `FASTBOOT_REGISTER` | `0x4C42B1F0` | exact |
 | `FASTBOOT_PUBLISH` | `0x4C42B22C` | exact |
@@ -94,7 +96,7 @@ board. "Exact" means the address coincides with an IDA function start.
 | `SET_ENV` | `0x4C45C51E` | prints `"[%s]set_env %s %s\n"` |
 | `RECOVERY_CMDLINE1` | `0x4C516380` | `"…verifiedbootstate=orange"` |
 | `RECOVERY_CMDLINE2` | `0x4C5163F4` | `"…verifiedbootstate=green"` |
-| `PLATFORM_INIT_CALLER` | **unset** | see [Known blocker](#known-blocker) |
+| `PLATFORM_INIT_CALLER` | `0x4C425E0C` | the `bl platform_init` in `bootstrap2`; hand-derived, see below |
 
 ### Why `app()` is not found by the usual method
 
@@ -191,48 +193,56 @@ Without the fastboot patch, spoofing alone makes fastboot reject commands with
 *"not support on security"* and *"not allowed in locked state"* on a device that is
 really unlocked underneath.
 
-## Known blocker
+## `PLATFORM_INIT_CALLER` had to be derived by hand
 
-`CONFIG_PLATFORM_INIT_CALLER` is intentionally left unset.
+`utils/parse.py` cannot produce this value on `gale`, but the caller exists.
 
-kaeru defines it as *"address of the function that calls `platform_init()`"*
-(`lib/Kconfig`), and `stage1/main.c` relies on it being the `bl platform_init` that
-`bootstrap2` executes: `patch.py` overwrites those 4 bytes with `bl stage1`, so the
-boot diverts into the payload, and stage1 later calls the real `platform_init()` to
-resume booting.
-
-On this LK **that instruction does not exist.** `platform_init()` is present and
-functional — it calls `init_storage()`, which is why `CONFIG_INIT_STORAGE_CALLER` is
-meaningful — but nothing calls it. The boot path enters the `.apps` table and runs
-`mt_boot_app` directly.
-
-Verified four ways:
-
-1. Alignment-independent scan of every 2-byte offset for a Thumb-2 `BL`, plus every
-   4-byte offset for an ARM `BL` (`0xEBxxxxxx`) → 0 hits.
-2. `platform_init`'s address (and `| 1`) as a stored word anywhere in the image →
-   0 hits.
-3. Literal-pool load feeding a `BLX Rm` that resolves to `platform_init` → 0 hits.
-4. IDA reports no code xref to the function.
-
-Because of this, `patch.py` aborts with:
+`parse.py` looks for the anchor `bootstrap2` and then searches the 256 bytes after
+it for a `bl`/`blx` aimed at `platform_init` (`find_caller`). Neither of its
+`bootstrap2` patterns
 
 ```
-ERROR: Invalid basic required configuration!
+48 XX 10 b5 78 44 XX f0 XX XX XX 4b
+08 b5 ff f7 38 ea df f7 e3 fb
 ```
 
-This is the intended behaviour. It refuses to emit an image rather than hijacking an
-unrelated call site and producing a device that does not boot.
+occurs anywhere in this image — zero hits each. Since the lookup is guarded by
+`if 'bootstrap2' in offsets and 'platform_init' in offsets`, `parse.py` never even
+attempts it, and no `CONFIG_PLATFORM_INIT_CALLER` line is emitted.
 
-### The natural hook for this LK
+The instruction it is looking for is present. `bootstrap2` in this build is:
 
-The correct interception point is the `.apps` entry itself at EA `0x122EA0`
-(runtime `0x4C522EA0`), which currently holds `0x4C42A9F1`. Overwriting that word
-with `(stage1 | 1)` would hand control over before `mt_boot_app` runs.
+```c
+dprintf("initializing target\n");     // string at EA 0x499F78
+platform_init(args);                  // BL at 0x4C425E0C  <-- the hook
+dprintf("calling apps_init()\n");     // string at EA 0x499F90
+apps_init(args);
+```
 
-This is a different injection mechanism than the `bl` rewrite `patch.py` performs, and
-it would also require a stage1 variant that resumes the boot without calling the dead
-`platform_init()`. It is not implemented.
+Both strings are referenced from this function, which is what pins the
+identification rather than guesswork. Recovering it required hand-decoding the
+region, because IDA classifies those bytes as data and Capstone's linear sweep
+misreads them. The identification was then confirmed against already-known config
+addresses: the decompiled body calls `0x4C4039DC` (`CONFIG_PLATFORM_INIT_ADDRESS`)
+and `0x4C440CE4` (`CONFIG_DPRINTF_ADDRESS`), and the two `dprintf` literals resolve
+to `0x499F78` and `0x499F90`.
+
+To prove the `bl` is the only one, every Thumb-2 `BL`/`BLX` in `[0, 0x79388)` was
+decoded with a hand-written decoder over 2-byte-aligned offsets — 13205 calls, with
+a sane target histogram — giving exactly one call to `0x4C4039DC` and none to any
+other address in `0x39C0`–`0x3A40`.
+
+### Why the rewrite is safe here
+
+`0x4C425E0C` is the *first* instruction of the function, and `patch.py` replaces
+exactly those 4 bytes, so the instruction stream stays consistent and `LR` still
+points at `0x4C425E10`. stage1's `main()` returns normally, execution resumes at
+`0x4C425E10`, and `dprintf("calling apps_init()")` plus `apps_init()` still run.
+
+The skipped `platform_init()` call is not lost: `kaeru_early_init()` invokes the
+real one through `CONFIG_PLATFORM_INIT_ADDRESS` before returning (`main/main.c`), and
+stage1 has already done `init_storage()` itself — which is why
+`CONFIG_INIT_STORAGE_CALLER` is NOPed out on the way in.
 
 ## Not yet implemented
 
@@ -259,8 +269,6 @@ python3 utils/patch.py configs/xiaomi/gale_defconfig lk.img kaeru -l stageone -o
 
 Or simply `./build.sh gale lk.img`.
 
-This currently stops at the `PLATFORM_INIT_CALLER` check described above.
-
 ## Reproducing the analysis
 
 Addresses were derived with IDA Pro against `lk.img` loaded at file offset `0x200`
@@ -275,7 +283,11 @@ recording:
   against the string you care about. A single linear sweep over the listing resolves
   6149 references this way.
 - **IDA leaves roughly 10% of the image as data**, including the region around
-  `0x4C425E0C`. A linear Capstone sweep happily decodes data as instructions and
-  invents branches that do not exist — one such phantom hit was mistaken for
-  `bl platform_init` early on. Prefer decoding each candidate offset independently
-  and validating against IDA's code/data classification.
+  `0x4C425E0C` that contains `bootstrap2`. Neither IDA's code/data classification nor
+  a linear Capstone sweep can be trusted there: Capstone happily decodes data as
+  instructions and invents branches — one such phantom `ldr` appeared in the `.apps`
+  area, and a phantom hit in this same region was at first mistaken for "platform_init
+  has no caller". Both tools are wrong in *both* directions here. The reliable
+  approach is to decode each candidate offset independently with a hand-written
+  decoder, then validate every callee against an address already known from the
+  config. Doing exactly that is what produced `PLATFORM_INIT_CALLER`.

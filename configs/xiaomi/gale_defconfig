@@ -31,11 +31,35 @@ CONFIG_BOOTLOADER_SIZE=0x173C00
 CONFIG_APP_ADDRESS=0x4C42A9F0
 
 # platform_init() prologue (PUSH.W {R4-R11,LR}) and the "platform_init()\n" string.
-# NOTE: on this LK build platform_init() has no caller, see PLATFORM_INIT_CALLER below.
 CONFIG_PLATFORM_INIT_ADDRESS=0x4C4039DC
 
-# The BL that platform_init() uses to call init_storage(), at +0x50 into it.
+# The BL that platform_init() uses to call init_storage(), at +0x30 into it.
+# stage1 NOPs these 4 bytes so storage is not initialized twice, since stage1 has
+# already called init_storage() itself before loading stage 2.
 CONFIG_INIT_STORAGE_CALLER=0x4C403A0C
+
+# The `bl platform_init` inside LK's bootstrap2. Hand-derived; parse.py cannot find
+# it on this LK because its bootstrap2 anchor patterns do not match (see below).
+#
+# The enclosing function is LK's bootstrap2 tail, reconstructed as:
+#
+#     dprintf("initializing target\n");        // EA 0x499F78
+#     platform_init(args);                     // <-- BL at 0x4C425E0C
+#     dprintf("calling apps_init()\n");        // EA 0x499F90
+#     apps_init(args);
+#
+# "initializing target\n" / "calling apps_init()\n" do appear in rodata and are
+# referenced from this function, which is what pins the identification. IDA leaves
+# this region as data, so the function had to be recovered by decoding byte-aligned
+# instructions by hand and validating the call targets: the two callees resolve to
+# 0x4C4039DC (CONFIG_PLATFORM_INIT_ADDRESS) and 0x4C440CE4 (CONFIG_DPRINTF_ADDRESS).
+#
+# Overwriting the 4 bytes here with `bl stage1` is safe because the original BL is
+# the first instruction of the function: stage1 returns normally, so execution
+# resumes at 0x4C425E10 and dprintf("calling apps_init()") plus apps_init() still run.
+# kaeru_early_init() invokes the real platform_init() itself (main/main.c) precisely
+# so the skipped call is not lost.
+CONFIG_PLATFORM_INIT_CALLER=0x4C425E0C
 
 # fastboot_continue() stores BOOTMODE_NORMAL into it first; lives in BSS, just past
 # LK_END (0x4C573C00), exactly like the earth board.
@@ -77,28 +101,25 @@ CONFIG_SPOOF_SUPPORT=y
 CONFIG_RECOVERY_CMDLINE_PATCH=y
 CONFIG_CERT_BYPASS=y
 
-# ── MISSING ON PURPOSE ────────────────────────────────────────────────────────────
-# CONFIG_PLATFORM_INIT_CALLER is intentionally left unset.
+# ── NOT SET BY utils/parse.py ───────────────────────────────────────────────────
 #
-# kaeru defines it as "address of the function that calls platform_init()" and
-# stage1/main.c relies on it being the `bl platform_init` that bootstrap2 executes,
-# so that overwriting it with `bl stage1` diverts the boot into the payload.
+# CONFIG_PLATFORM_INIT_CALLER is written by hand above because parse.py's two
+# bootstrap2 anchor patterns
 #
-# On this LK that instruction does not exist. platform_init() is present and fully
-# functional (it calls init_storage(), which is why CONFIG_INIT_STORAGE_CALLER is
-# meaningful), but nothing calls it: the boot path enters the .apps table and runs
-# mt_boot_app directly. Verified three independent ways:
-#   * alignment-independent scan of every 2-byte offset for Thumb-2 BL, and every
-#     4-byte offset for ARM BL (0xEBxxxxxx)  -> 0 hits
-#   * platform_init's address as a stored word anywhere in the image      -> 0 hits
-#   * literal-pool load + BLX Rm (indirect) resolving to platform_init    -> 0 hits
+#     48 XX 10 b5 78 44 XX f0 XX XX XX 4b
+#     08 b5 ff f7 38 ea df f7 e3 fb
 #
-# patch.py aborts with "Invalid basic required configuration" while this is unset,
-# which is the safe outcome: it refuses to emit an image rather than bricking the
-# device by hijacking an unrelated call site.
+# do not occur anywhere in this LK image (0 hits each), and parse.py guards the
+# caller lookup with `if 'bootstrap2' in offsets and 'platform_init' in offsets`.
+# Without that anchor it never even tries, so it emits no caller address.
 #
-# The natural hook for this LK is the .apps entry itself at EA 0x122EA0
-# (runtime 0x4C522EA0), which currently holds 0x4C42A9F1. Overwriting that word
-# with (stage1 | 1) would hand control over before mt_boot_app runs, but that needs
-# a different injection path than the `bl` rewrite patch.py does, plus a stage1 that
-# resumes boot without calling the dead platform_init(). Not implemented here.
+# The caller itself is not missing, though: the `bl platform_init` exists at
+# 0x4C425E0C and is on the boot path. Verified by decoding every Thumb-2 BL/BLX
+# in [0, 0x79388) with a hand-written decoder over 2-byte-aligned offsets (13205
+# calls, target histogram sane), which finds exactly one BL to 0x4C4039DC and none
+# anywhere else in the image.
+#
+# What made this look absent: capstone's linear sweep desynchronises on this LK's
+# data regions and IDA classifies the surrounding bytes as data, so both were
+# untrustworthy. Decoding each candidate offset independently and checking the
+# callee against known config addresses is what settled it.
