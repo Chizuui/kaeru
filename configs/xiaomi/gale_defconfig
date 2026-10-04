@@ -1,23 +1,26 @@
 # Redmi 13C (gale) — MediaTek MT6768
 #
 # Every address below was derived from THIS device's own lk.img, not copied from
-# another board. Load base and size in particular were triple-checked, because
-# utils/parse.py's get_load_addr() picks the wrong word for this image:
+# another board. Load base and size in particular were checked three ways:
 #
 #   * the LK descriptor at EA 0x6c is { bx r0 ; 0x4C400020 ; 0x4C400000 ;
 #     0x4C573C00 ; 0x4C400080 }, and 0x4C573C00 - 0x4C400000 == 0x173C00 which is
-#     exactly the size word in the image header, so the base is 0x4C400000 and
-#     0x4C400020 is a data address *inside* LK.
+#     exactly the size word in the image header, so the base is 0x4C400000.
 #   * the Thumb literal at EA 0x42a4 holds 0x76e20 and is consumed by
 #     `LDR.W r0,[pc,#..] ; ADD r0,pc`, which resolves to 0x4C400000 + 0x7a824
 #     (the "platform_init()\n" string).
 #   * mtk_detect_key lands 4 bytes from the same function on the MT6768 earth LK.
 #
-# Running utils/setup.py on this image yields BASE=0x4C400020 and therefore shifts
-# every address by +0x20. The values here are the corrected ones.
+# get_load_addr() in utils/parse.py looks like it would return the 0x4C400020 that
+# sits right after the `bx r0` in that descriptor, but it does not: its return
+# statement is `struct.unpack(...) if lk.read(4) else None`, and Python evaluates the
+# condition first, so two 4-byte reads happen and the word that gets unpacked is the
+# one at +8. That is 0x4C400000, so BOOTLOADER_BASE is correct and running
+# utils/setup.py on this image reproduces every value in this file unchanged — with
+# the single exception of FASTBOOT_OKAY_ADDRESS, documented below.
 #
 # Functions confirmed to land exactly on IDA function starts:
-#   fastboot_info 0x4C42B680, fastboot_okay 0x4C42B820, fastboot_publish 0x4C42B22C,
+#   fastboot_info 0x4C42B680, fastboot_okay 0x4C42BA00, fastboot_publish 0x4C42B22C,
 #   video_printf 0x4C42DA1C, mtk_detect_key 0x4C4054A8, thread_create 0x4C4265C8,
 #   thread_resume 0x4C4267DC, malloc 0x4C4419E0, free 0x4C441114, dprintf 0x4C440CE4,
 #   lk_log_store 0x4C455694, app 0x4C42A9F0 (from the .apps row at EA 0x122E9C).
@@ -68,7 +71,22 @@ CONFIG_BOOTMODE_ADDRESS=0x4C5765A4
 CONFIG_FASTBOOT_REGISTER_ADDRESS=0x4C42B1F0
 CONFIG_FASTBOOT_PUBLISH_ADDRESS=0x4C42B22C
 CONFIG_FASTBOOT_INFO_ADDRESS=0x4C42B680
-CONFIG_FASTBOOT_OKAY_ADDRESS=0x4C42B820
+# NOTE: utils/parse.py reports 0x4C42B820 for this, which is wrong. Its
+# fastboot_okay signature is not discriminative on this LK: both fastboot_okay and
+# fastboot_fail compile to the same shape
+#
+#     mov r1, r0 ; ldr r0, [pc, #8] ; add r0, pc ; b.w <emit>
+#
+# and the only difference the pattern looks at is the low byte of the branch offset
+# (0xBE vs 0xBF). Here the branch is a B.W rather than a BL, so that byte is just
+# part of the displacement and the signature matches the wrong function.
+#
+# Verified by the string each one loads:
+#   0x4C42BA00 -> "OKAY"  (12 callers, all success paths)  <- fastboot_okay
+#   0x4C42B820 -> "FAIL"  (36 callers, includes both fastboot refusal sites)
+# Getting this wrong makes lib/fastboot/fastboot.c emit FAIL for every
+# fastboot_okay(), which breaks fastboot entirely.
+CONFIG_FASTBOOT_OKAY_ADDRESS=0x4C42BA00
 
 CONFIG_VIDEO_PRINTF_ADDRESS=0x4C42DA1C
 CONFIG_MTK_DETECT_KEY_ADDRESS=0x4C4054A8

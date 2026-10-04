@@ -8,9 +8,8 @@ was obtained, and what is still missing.
 > Read the [kaeru wiki](https://github.com/R0rt1z2/kaeru/wiki) before flashing
 > anything. Modifying a bootloader can permanently brick the device. These notes
 > describe an **unverified** port: the offsets are derived from this device's own
-> image, but no patched image has been built and booted yet, and two AVB-related
-> patches listed under [Not yet implemented](#not-yet-implemented) are still
-> missing.
+> image, but no patched image has been built and booted yet, and the vbmeta key
+> check listed under [Not yet implemented](#not-yet-implemented) is still missing.
 
 ## Device
 
@@ -27,14 +26,29 @@ was obtained, and what is still missing.
 The LK image contains six partitions: `lk`, `cert1`, `cert2`, `lk_main_dtb`,
 `cert1`, `cert2`. The `lk` partition itself spans `0x0`–`0x173C00`.
 
-## The load base is not what `utils/setup.py` reports
+## The load base, and a `get_load_addr()` quirk that does *not* fire
 
-`utils/parse.py` determines the load address by scanning forward from file offset
-`0x200` for the ARM instruction `e12fff10` (`bx r0`) and then reading the next word.
-On this image that yields **`0x4C400020`, which is wrong**. Every address derived
-that way is shifted by `+0x20`.
+`utils/parse.py` finds the load address by scanning forward from file offset `0x200`
+for `10 ff 2f e1` (`bx r0`) and then reading the following word. On this image the
+first such instruction is at file offset `0x26C`, and the word right after it is
+`0x4C400020` — which looks like the load address but is a data word inside LK.
 
-The real base is `0x4C400000`. Three independent proofs:
+`get_load_addr()` nevertheless returns the correct `0x4C400000`. Its last line is:
+
+```python
+return struct.unpack('<I', lk.read(4))[0] if lk.read(4) else None
+```
+
+Python evaluates the condition of a conditional expression first, so `lk.read(4)`
+runs, discards its result and advances the cursor, and only then does the
+`struct.unpack` read fire. Two reads happen, and the word that gets unpacked is the
+one at **+8**, which is `0x4C400000`.
+
+Confirmed empirically: running `utils/parse.py` against this image reproduces every
+value in `configs/xiaomi/gale_defconfig` unchanged, with exactly one exception —
+`FASTBOOT_OKAY_ADDRESS`, see [below](#fastboot_okay-is-mislabelled-by-parsepy).
+
+The base is worth recording as verified three ways regardless:
 
 1. **The LK descriptor.** At IDA EA `0x6C` sits
    `{ bx r0 ; 0x4C400020 ; 0x4C400000 ; 0x4C573C00 ; 0x4C400080 }`.
@@ -53,9 +67,39 @@ A fourth confirmation came after the fact: the `dm_verity_corruption` signature
 derived for `gale` (`B530 B083 AB02 2200`) turned out to be **byte-identical** to
 the one `board-earth.c` already uses. That can only match if the base is correct.
 
-> When re-running `setup.sh` on this device, ignore the printed
-> `CONFIG_BOOTLOADER_BASE` and use `0x4C400000`, subtracting `0x20` from every other
-> address it reports.
+> An earlier revision of these notes claimed `setup.sh` prints `0x4C400020` and that
+> every address needs a `-0x20`. That was wrong — it came from reading
+> `get_load_addr()`'s source without noticing the double `lk.read(4)`. Nothing needs
+> adjusting.
+
+## `fastboot_okay` is mislabelled by `parse.py`
+
+`utils/parse.py` reports `CONFIG_FASTBOOT_OKAY=0x4C42B820` for this image. That is
+**`fastboot_fail`**, and the defconfig overrides it.
+
+The two functions compile to the same shape:
+
+```
+mov r1, r0 ; ldr r0, [pc, #8] ; add r0, pc ; b.w <emit>
+```
+
+and the only thing the signature distinguishes is the low byte of the branch
+displacement (`0xBE` for okay, `0xBF` for fail). On this LK the branch is a `B.W`
+rather than the `BL` those bytes were derived from, so that byte is just part of the
+offset and the signature matches whichever function happens to fit — here, the wrong
+one.
+
+Which is which is settled by the string each one loads:
+
+| Address | Loads | Callers | Function |
+|---|---|---|---|
+| `0x4C42BA00` | `"OKAY"` | 12, all success paths | `fastboot_okay` |
+| `0x4C42B820` | `"FAIL"` | 36, including both fastboot refusal sites | `fastboot_fail` |
+
+This one matters: `lib/fastboot/fastboot.c` calls
+`(CONFIG_FASTBOOT_OKAY_ADDRESS | 1)` for **every** `fastboot_okay("")`, so with the
+value `parse.py` produces, kaeru would answer `FAIL` to every successful fastboot
+command.
 
 ## Address model
 
@@ -83,7 +127,7 @@ board. "Exact" means the address coincides with an IDA function start.
 | `FASTBOOT_REGISTER` | `0x4C42B1F0` | exact |
 | `FASTBOOT_PUBLISH` | `0x4C42B22C` | exact |
 | `FASTBOOT_INFO` | `0x4C42B680` | exact |
-| `FASTBOOT_OKAY` | `0x4C42B820` | exact |
+| `FASTBOOT_OKAY` | `0x4C42BA00` | loads `"OKAY"`; `parse.py` gets this wrong, see [above](#fastboot_okay-is-mislabelled-by-parsepy) |
 | `VIDEO_PRINTF` | `0x4C42DA1C` | exact |
 | `MTK_DETECT_KEY` | `0x4C4054A8` | exact, −4 bytes from `earth` |
 | `LK_LOG_STORE` | `0x4C455694` | exact |
@@ -122,7 +166,7 @@ identity.
 
 ## Board file
 
-`board/xiaomi/board-gale.c` follows the approach of `board-earth.c`. All nine
+`board/xiaomi/board-gale.c` follows the approach of `board-earth.c`. All twelve
 `SEARCH_PATTERN` signatures resolve to **exactly one hit** in this image, which was
 verified before committing.
 
@@ -137,6 +181,17 @@ verified before committing.
 | `B508 4B11 447B 681B` | `0x4C454758` | `cmdline_pre_process()` |
 | `F03D F8D5 6823 2000` | `0x4C403B36` | the `"ENV init"` printf |
 | `B530 B083 AB02 2200` | `0x4C467F18` | `dm_verity_corruption()` |
+| `E92D 4FF0 4691 F102` | `0x4C462260` | `avb_add_cmdline_options()` |
+| `B508 F7FF FF63 F3C0` | `0x4C417B58` | `get_vfy_policy()` |
+| `B508 F7FF FF5D F000` | `0x4C417B64` | `get_dl_policy()` |
+
+The two policy signatures are the ones `board-earth.c` uses, and they each match once.
+They are forced to return `0` unconditionally, as on `earth`: image authentication has
+to be off for unsigned images to boot, and download policy has to be off because the
+spoofed `locked` state would otherwise mark partitions as download-forbidden. Note
+they land 12 bytes apart, which looks alarming until you check that the signatures are
+`B508 F7FF FF63 F3C0` and `B508 F7FF FF5D F000` — different at the fourth halfword, and
+non-overlapping.
 
 ### Identified LK internals
 
@@ -244,18 +299,70 @@ real one through `CONFIG_PLATFORM_INIT_ADDRESS` before returning (`main/main.c`)
 stage1 has already done `init_storage()` itself — which is why
 `CONFIG_INIT_STORAGE_CALLER` is NOPed out on the way in.
 
+## AVB device state in the kernel cmdline
+
+`libavb` appends `androidboot.vbmeta.device_state=...` to the kernel cmdline, and on
+this LK it keeps saying `"unlocked"` because the state it reads is the real one rather
+than the spoofed one. `board-gale.c` forces the `"locked"` string.
+
+The function is `avb_add_cmdline_options()` at `0x4C462260`, found with the same
+signature `board-earth.c` uses (`E92D 4FF0 4691 F102`, one hit). IDA has it as
+`sub_62260`, called from `sub_65E0E`, and its strings confirm the identity:
+`"androidboot.vbmeta.device_state"` sits right next to the `locked`/`unlocked` pair.
+
+The pick between the two strings is a single `CBNZ`:
+
+```
+0x4C462300  LDR   R3, [SP,#0x24]    ; device state libavb just fetched
+0x4C462302  CBNZ  R3, 0x4C462354   ; non-zero -> "unlocked"
+0x4C462304  LDR   R2, ="locked"
+0x4C462308  LDR   R1, ="androidboot.vbmeta.device_state"
+0x4C46230E  BL    append_option    ; append "...device_state=locked"
+...
+0x4C462354  LDR   R2, ="unlocked"
+```
+
+So `NOP(addr + 0xA2, 1)` forces the fallthrough and the cmdline always claims locked.
+
+Two things differ from `earth`, and both matter:
+
+- **The offset is `+0xA2`, not `+0x9C`.** On this build `+0x9C` holds
+  `BEQ loc_622E8`, which is libavb's `if (state == 1) return 1;` error check.
+  Copying earth's offset would disable error handling and change nothing about the
+  device state.
+- **Only one halfword is NOPed.** `NOP(addr, n)` writes `n` halfwords, and the
+  instruction immediately after the `CBNZ` is the literal load for `"locked"`. A
+  two-halfword NOP would eat it and leave `r2` holding garbage.
+
+This patch is gated behind the spoof being enabled, so disabling the spoof leaves the
+cmdline reporting the real state.
+
 ## Not yet implemented
 
-- **AVB cmdline device state.** The function is `0x4C42BEC0` (it starts by printing
-  `"fastboot_init()\n"`). The device-state decision calls the two lock-state adapters
-  at `0x4C42C376` and `0x4C42C382` and uses the results as indices into a table when
-  publishing `"secure"` (`0x4C42C3AC`) and `"unlocked"` (`0x4C42C3BA`) via
-  `fastboot_publish`. The control flow is mapped, but a patch has not been chosen,
-  because forcing this incorrectly is worse than leaving it alone.
 - **`load_and_verify_vbmeta`.** `board-earth.c` patches three spots so any vbmeta
-  public key is accepted. Not derived for `gale`. Consequence: on an
-  SBC-enabled device the spoof may still hit *"Public key used to sign data
-  rejected"*.
+  public key is accepted. The signature is present exactly once, at `0x4C464CF8`
+  inside `sub_6463C` (5298 bytes, called from `sub_65E0E`), and two of earth's three
+  offsets carry over unchanged:
+
+  | Offset | `earth` | `gale` | Status |
+  |---|---|---|---|
+  | `+0x00` | `NOP(,2)` — `BNE.W` | `bne.w #0x4C4649D2` | applies as-is |
+  | `+0x72` | `PATCH_MEM(,0x2301)` — `cmp r3,#0` | `cmp r3, #0` | applies as-is |
+  | `-0x32C` | `PATCH_MEM(,0x451B)` — `cmp r2, r3` | `cmp r2, sl` | **not derived** |
+
+  The third spot is where `earth` rewrites the chained-key length check into
+  `cmp r3, r3` so it can never fail. On `gale` that offset holds a different
+  comparison, and there is **no `cmp r2, r3` anywhere in the function**, so the
+  key-length check has to be re-identified from scratch rather than offset-shifted.
+  That was left alone rather than guessed. Consequence: on an SBC-enabled device the
+  spoof may still hit *"Public key used to sign data rejected"*.
+- **AVB device state published to fastboot.** Separate from the cmdline above. The
+  function is `0x4C42BEC0` (it starts by printing `"fastboot_init()\n"`). The
+  device-state decision calls the two lock-state adapters at `0x4C42C376` and
+  `0x4C42C382` and uses the results as indices into a table when publishing
+  `"secure"` (`0x4C42C3AC`) and `"unlocked"` (`0x4C42C3BA`) via `fastboot_publish`.
+  The control flow is mapped, but a patch has not been chosen, because forcing this
+  incorrectly is worse than leaving it alone.
 - **SoC-dependent base addresses.** `CONFIG_MEDIATEK_MT6768` is set, which selects the
   UART, watchdog and SEJ bases in `soc/Kconfig`.
 

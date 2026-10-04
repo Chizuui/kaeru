@@ -43,11 +43,36 @@
 #define SIG_ENV_INIT_PRINTF  0xF03D, 0xF8D5, 0x6823, 0x2000
 // dm-verity corruption warning shown while booting
 #define SIG_DM_VERITY        0xB530, 0xB083, 0xAB02, 0x2200
+// avb_add_cmdline_options(): the function that assembles
+// androidboot.vbmeta.device_state=... for the kernel cmdline
+#define SIG_AVB_CMDLINE      0xE92D, 0x4FF0, 0x4691, 0xF102
+// get_vfy_policy() / get_dl_policy(): image authentication and download policy
+#define SIG_GET_VFY_POLICY   0xB508, 0xF7FF, 0xFF63, 0xF3C0
+#define SIG_GET_DL_POLICY    0xB508, 0xF7FF, 0xFF5D, 0xF000
 
 // Offsets inside the fastboot command processor, measured from its entry above.
 #define FB_FAIL_NOT_SUPPORTED   0x170   // BL fastboot_fail, "not support on security"
 #define FB_FAIL_NOT_ALLOWED     0x17C   // BL fastboot_fail, "not allowed in locked state"
 #define FB_SECURITY_GATE        0x12A   // BL sec_usbdl_enabled, branches into the handler
+
+// Offset inside avb_add_cmdline_options(), measured from its entry above. This is
+// the CBNZ that picks between the "locked" and "unlocked" strings:
+//
+//     +0xA0  LDR  R3, [SP,#var_88]     ; the device state libavb just fetched
+//     +0xA2  CBNZ R3, +0x52            ; non-zero -> "unlocked"
+//     +0xA4  LDR  R2, ="locked"
+//     +0xA8  LDR  R1, ="androidboot.vbmeta.device_state"
+//     +0xAE  BL   append_option
+//
+// NOPing the CBNZ forces the fallthrough, so the "locked" string is always used.
+// Only that one halfword is NOPed: the very next instruction is the literal load
+// for "locked", and a wider NOP would eat it.
+//
+// This is +0xA2 and deliberately not the +0x9C that board-earth.c uses. On this
+// build +0x9C holds "BEQ loc_622E8", which is libavb's
+// `if (state == 1) return 1;` error check; NOPing it would quietly disable error
+// handling and would not change the device state at all.
+#define AVB_DEVICE_STATE_SEL   0xA2
 
 static void spoof_lock_state(void) {
     uint32_t addr = 0;
@@ -132,6 +157,16 @@ static void spoof_lock_state(void) {
         PATCH_MEM(addr + FB_SECURITY_GATE, 0xE017);
     }
 
+    // libavb appends androidboot.vbmeta.device_state to the kernel cmdline, and it
+    // keeps reporting "unlocked" because the state it reads is the real one, not the
+    // spoofed one the lock shim hands out. Forcing the "locked" string keeps the
+    // cmdline consistent with the lock state everything else observes.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_AVB_CMDLINE);
+    if (addr) {
+        printf("Found AVB cmdline function at 0x%08X\n", addr);
+        NOP(addr + AVB_DEVICE_STATE_SEL, 1);
+    }
+
     // cmdline_pre_process runs just before the cmdline is handed to the kernel.
     // Hooking it lets handle_recovery_boot() flip verifiedbootstate back to
     // "orange" when booting recovery, so adbd and fastbootd still work there even
@@ -151,6 +186,26 @@ void board_early_init(void) {
     printf("Entering early init for Redmi 13C (gale)\n");
 
     uint32_t addr = 0;
+
+    // Regardless of whether spoofing is enabled we have to disable image
+    // authentication, because the user may be running this LK purely to unlock the
+    // device, and because reporting "locked" makes LK enforce verification. Forcing
+    // get_vfy_policy() to 0 skips certificate verification for every partition and
+    // firmware image (boot, recovery, dtbo, SCP, ...), so modified or unsigned
+    // images can boot.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_GET_VFY_POLICY);
+    if (addr) {
+        printf("Found get_vfy_policy at 0x%08X\n", addr);
+        FORCE_RETURN(addr, 0);
+    }
+
+    // Same idea for downloads. While the spoof reports "locked", get_dl_policy()
+    // would otherwise mark partitions as download-forbidden and break flashing.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_GET_DL_POLICY);
+    if (addr) {
+        printf("Found get_dl_policy at 0x%08X\n", addr);
+        FORCE_RETURN(addr, 0);
+    }
 
     // The environment area is not initialized yet when board_early_init runs, so
     // get_env() always returns NULL at this point and the spoof cannot be gated on
