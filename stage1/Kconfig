@@ -55,9 +55,19 @@ menu "Stage 1 Options"
     config PARTITION_READ_ADDRESS
         hex "partition_read() address"
         depends on !USE_MT_PART_API && !USE_LEGACY_PARTITION_API
+        default 0
+        help
+          Leave at 0 if this LK does not export a matching partition_read().
+          stage1 then declines to read partitions and skips loading itself instead
+          of calling through address 1.
 
     config PARTITION_GET_SIZE_BY_NAME_ADDRESS
         hex "partition_get_size_by_name() address"
         depends on !USE_MT_PART_API && !USE_LEGACY_PARTITION_API
+        default 0
+        help
+          Leave at 0 if this LK does not export partition_get_size_by_name().
+          stage1 then cannot size the bootloader partition and skips loading itself
+          instead of calling through address 1.
 
 endmenu

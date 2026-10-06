@@ -79,8 +79,15 @@ ssize_t partition_read(const char* part_name, off_t offset, uint8_t* data, size_
     return (read_bytes < 0) ? -1 : read_bytes;
 #endif
 #else
+#if CONFIG_PARTITION_READ_ADDRESS
     return ((ssize_t (*)(const char*, off_t, uint8_t*, size_t))(CONFIG_PARTITION_READ_ADDRESS | 1))(
             part_name, offset, data, size);
+#else
+    // This LK does not export a partition_read() with this signature. Calling
+    // (0 | 1) would branch to address 1 and fault during boot, so decline the read
+    // instead and let load_kaeru_partition() skip the payload gracefully.
+    return -1;
+#endif
 #endif
 }
 
@@ -99,6 +106,12 @@ uint64_t partition_get_size_by_name(const char* part_name) {
 
     return mt_part_size(part);
 #else
+#if CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS
     return ((uint64_t (*)(const char*))(CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS | 1))(part_name);
+#else
+    // Not configured for this LK; see partition_read() above. load_kaeru_partition()
+    // treats a zero size as "cannot read the partition" and skips the payload.
+    return 0;
+#endif
 #endif
 }

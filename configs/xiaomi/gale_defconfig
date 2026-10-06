@@ -178,6 +178,12 @@ CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS=0x4C45C1C4
 # struct device_t, whose layout has not been verified against LK's. That layout is a
 # silent memory-corruption risk if wrong, so the flag is not set here until it is
 # checked.
+#
+# CONFIG_PARTITION_READ_ADDRESS therefore stays at the Kconfig default of 0. That 0 is
+# not an address: stage1/common.c checks for it and returns -1 rather than calling
+# through address 1, so the build stops being interactive and the device boots
+# normally, just without kaeru loading itself. Filling the value in later needs no
+# further code change.
 
 CONFIG_MEDIATEK_MT6768=y
 CONFIG_XIAOMI_GALE=y
