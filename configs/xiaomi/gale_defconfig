@@ -40,6 +40,9 @@ CONFIG_PLATFORM_INIT_ADDRESS=0x4C4039DC
 # stage1 NOPs these 4 bytes so storage is not initialized twice, since stage1 has
 # already called init_storage() itself before loading stage 2.
 CONFIG_INIT_STORAGE_CALLER=0x4C403A0C
+# init_storage() itself, which that BL targets. stage1 calls it once up front to get
+# storage available for loading stage 2.
+CONFIG_INIT_STORAGE_ADDRESS=0x4C40378C
 
 # The `bl platform_init` inside LK's bootstrap2. Hand-derived; parse.py cannot find
 # it on this LK because its bootstrap2 anchor patterns do not match (see below).
@@ -71,6 +74,11 @@ CONFIG_BOOTMODE_ADDRESS=0x4C5765A4
 CONFIG_FASTBOOT_REGISTER_ADDRESS=0x4C42B1F0
 CONFIG_FASTBOOT_PUBLISH_ADDRESS=0x4C42B22C
 CONFIG_FASTBOOT_INFO_ADDRESS=0x4C42B680
+# fastboot_fail() emits "FAIL" and is what both refusal sites call, so it is the exact
+# counterpart of the "OKAY" function above. Left unset before, which made Kconfig
+# prompt for it during `make gale_defconfig`; parse.py cannot find it because the
+# okay/fail signatures are not discriminative on this LK, as described above.
+CONFIG_FASTBOOT_FAIL_ADDRESS=0x4C42B820
 # NOTE: utils/parse.py reports 0x4C42B820 for this, which is wrong. Its
 # fastboot_okay signature is not discriminative on this LK: both fastboot_okay and
 # fastboot_fail compile to the same shape
@@ -112,6 +120,57 @@ CONFIG_SET_ENV_ADDRESS=0x4C45C51E
 # Both live in the verifiedbootstate switcher at 0x4C454758.
 CONFIG_RECOVERY_CMDLINE1_ADDRESS=0x4C516380
 CONFIG_RECOVERY_CMDLINE2_ADDRESS=0x4C5163F4
+
+# `fastboot oem bldr_spoof on|off` persists its flag through LK's environment, so
+# ENVIRONMENT_SUPPORT is what makes the toggle survive a reboot. Without it get_env()
+# and set_env() are compiled out and the spoof would always read as disabled.
+CONFIG_ENVIRONMENT_SUPPORT=y
+
+# partition_get_size_by_name(), which stage1 calls to size the "lk" partition before
+# walking its sub-partition headers. Derived from the partition.c thunk cluster:
+# sub_5C120() resolves the name to an index, sub_5BBEC() turns that index into a size,
+# and sub_5C1C4 at 0x4C45C1C4 is the two-line wrapper over both. It returns unsigned
+# long long, matching what stage1 expects.
+CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS=0x4C45C1C4
+
+# ── STILL MISSING: PARTITION_READ_ADDRESS ─────────────────────────────────────────
+#
+# `make gale_defconfig` still prompts for partition_read(), and that prompt should not
+# be answered by guessing: with a wrong value stage1 reads garbage and either fails to
+# find the kaeru sub-partition or reads out of bounds.
+#
+# The problem is that this LK's partition primitives are not the 4-argument
+# partition_read(part, offset, buf, size) that stage1/common.c calls in the default
+# (neither USE_MT_PART_API nor USE_LEGACY_PARTITION_API) configuration. What gale
+# actually has, all in partition.c:
+#
+#   0x4C45C120  sub_5C120  name -> index, walks the table with a 0x30 stride
+#   0x4C45BB0C  sub_5BB0C  index -> block device handle
+#   0x4C45BBEC  sub_5BBEC  index -> size in bytes (block size x sector count)
+#   0x4C45DC8C  sub_5DC8C  read,  5 args: (name, size, offset, buf, size)
+#   0x4C45DDD8  sub_5DDD8  write, 5 args, same shape
+#   0x4C45C1C4  sub_5C1C4  name -> size            <- CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS
+#   0x4C45C1D4  sub_5C1D4  name -> offset
+#   0x4C45C1E4  sub_5C1E4  "name not found" test
+#   0x4C45C1F8  sub_5C1F8  block size for a partition
+#
+# The 5-argument shape is confirmed by set_env's own call,
+# sub_5DDD8("env", 0x4000, 0x20000, buf, 0x4000), where the second and fifth
+# arguments are both the length and the third is the offset.
+#
+# Three ways forward, none of them safe to pick blind:
+#
+#   1. USE_MT_PART_API=y, plus CONFIG_MT_PART_GET_DEVICE_ADDRESS and
+#      CONFIG_MT_PART_GET_PARTITION_ADDRESS. stage1 then goes through LK's own
+#      mt_part_get_device()/mt_part_get_partition(), which is the cleanest fit, but it
+#      also depends on include/lib/mt_part.h's struct device_t matching LK's layout
+#      byte for byte. A mismatch there is a silent, memory-corrupting bug.
+#   2. USE_LEGACY_PARTITION_API=y, plus the three addresses above
+#      (0x4C45C120, 0x4C45BB0C, 0x4C45BBEC) and still MT_PART_GET_DEVICE_ADDRESS.
+#      Same struct device_t dependency.
+#   3. Find or write a 4-argument shim. Not attempted here.
+#
+# This is left unset on purpose until one of those is chosen and verified.
 
 CONFIG_MEDIATEK_MT6768=y
 CONFIG_XIAOMI_GALE=y
