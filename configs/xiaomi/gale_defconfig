@@ -135,42 +135,49 @@ CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS=0x4C45C1C4
 
 # ── STILL MISSING: PARTITION_READ_ADDRESS ─────────────────────────────────────────
 #
-# `make gale_defconfig` still prompts for partition_read(), and that prompt should not
-# be answered by guessing: with a wrong value stage1 reads garbage and either fails to
-# find the kaeru sub-partition or reads out of bounds.
+# This one genuinely does not exist in the form kaeru's default configuration calls.
+# stage1/common.c wants partition_read(part, offset, buf, size), i.e. AAPCS
+# (r0=name, r1:r2=offset, r3=buf, [sp]=size). What this LK actually has is a 5-argument
+# primitive at 0x4C45DC8C taking
 #
-# The problem is that this LK's partition primitives are not the 4-argument
-# partition_read(part, offset, buf, size) that stage1/common.c calls in the default
-# (neither USE_MT_PART_API nor USE_LEGACY_PARTITION_API) configuration. What gale
-# actually has, all in partition.c:
+#     (r0=name, r1=?, r2:r3=offset, [sp]=buf, [sp+4]=size)
 #
-#   0x4C45C120  sub_5C120  name -> index, walks the table with a 0x30 stride
-#   0x4C45BB0C  sub_5BB0C  index -> block device handle
-#   0x4C45BBEC  sub_5BBEC  index -> size in bytes (block size x sector count)
-#   0x4C45DC8C  sub_5DC8C  read,  5 args: (name, size, offset, buf, size)
-#   0x4C45DDD8  sub_5DDD8  write, 5 args, same shape
-#   0x4C45C1C4  sub_5C1C4  name -> size            <- CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS
-#   0x4C45C1D4  sub_5C1D4  name -> offset
-#   0x4C45C1E4  sub_5C1E4  "name not found" test
-#   0x4C45C1F8  sub_5C1F8  block size for a partition
+# which is confirmed by set_env's own call into the write twin at 0x4C45DDD8:
+# sub_5DDD8("env", 0x4000, 0x20000, buf, 0x4000), where the second and fifth arguments
+# are both the length and the third is the offset. The two layouts disagree about which
+# register holds the buffer, so pointing this at 0x4C45DC8C would hand stage1 a
+# pointer it never intended and read out of bounds. It is left unset rather than set
+# wrong.
 #
-# The 5-argument shape is confirmed by set_env's own call,
-# sub_5DDD8("env", 0x4000, 0x20000, buf, 0x4000), where the second and fifth
-# arguments are both the length and the third is the offset.
+# Everything in partition.c has been identified and cross-checked:
 #
-# Three ways forward, none of them safe to pick blind:
+#   0x4C45C120  name -> index      cmp/strcmp loop, stride 0x30, four name slots per
+#                                  entry at +0x0 +0xC +0x18 +0x24
+#   0x4C45C1C4  name -> size       CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS
+#   0x4C45C1D4  name -> offset     tail-calls 0x4C45BB90
+#   0x4C45C1E4  "name not found"   index == -1, via clz/lsr
+#   0x4C45C1F8  name -> blockdev   tail-calls 0x4C45BB0C
+#   0x4C45BB0C  index -> part      index <= 0x7F ? table[index] : -1, stride 0x20
+#   0x4C45BB90  index -> offset    via 0x4C4696B8
+#   0x4C45BBEC  index -> size      block size x sector count
+#   0x4C45DC8C  read, 5 args       1
+#   0x4C45DDD8  write, 5 args      1
+#   0x4C4696B8  mt_part_get_device() candidate: loads a pointer from a literal,
+#                                  dereferences it and returns the device
 #
-#   1. USE_MT_PART_API=y, plus CONFIG_MT_PART_GET_DEVICE_ADDRESS and
-#      CONFIG_MT_PART_GET_PARTITION_ADDRESS. stage1 then goes through LK's own
-#      mt_part_get_device()/mt_part_get_partition(), which is the cleanest fit, but it
-#      also depends on include/lib/mt_part.h's struct device_t matching LK's layout
-#      byte for byte. A mismatch there is a silent, memory-corrupting bug.
-#   2. USE_LEGACY_PARTITION_API=y, plus the three addresses above
-#      (0x4C45C120, 0x4C45BB0C, 0x4C45BBEC) and still MT_PART_GET_DEVICE_ADDRESS.
-#      Same struct device_t dependency.
-#   3. Find or write a 4-argument shim. Not attempted here.
+# Because the index/offset/size trio is now fully known, USE_LEGACY_PARTITION_API=y is
+# a viable route and needs
 #
-# This is left unset on purpose until one of those is chosen and verified.
+#   CONFIG_USE_LEGACY_PARTITION_API=y
+#   CONFIG_PARTITION_GET_INDEX_ADDRESS=0x4C45C120
+#   CONFIG_PARTITION_GET_OFFSET_ADDRESS=0x4C45BB90
+#   CONFIG_PARTITION_GET_SIZE_ADDRESS=0x4C45BBEC
+#   CONFIG_MT_PART_GET_DEVICE_ADDRESS=0x4C4696B8   (unconfirmed)
+#
+# but that mode also calls dev->read(...) through include/lib/mt_part.h's
+# struct device_t, whose layout has not been verified against LK's. That layout is a
+# silent memory-corruption risk if wrong, so the flag is not set here until it is
+# checked.
 
 CONFIG_MEDIATEK_MT6768=y
 CONFIG_XIAOMI_GALE=y
