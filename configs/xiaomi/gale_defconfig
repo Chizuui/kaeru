@@ -133,11 +133,11 @@ CONFIG_ENVIRONMENT_SUPPORT=y
 # long long, matching what stage1 expects.
 CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS=0x4C45C1C4
 
-# ── STILL MISSING: PARTITION_READ_ADDRESS ─────────────────────────────────────────
+# ── WHY NOT THE DEFAULT PARTITION MODE ───────────────────────────────────────────
 #
-# This one genuinely does not exist in the form kaeru's default configuration calls.
-# stage1/common.c wants partition_read(part, offset, buf, size), i.e. AAPCS
-# (r0=name, r1:r2=offset, r3=buf, [sp]=size). What this LK actually has is a 5-argument
+# stage1/common.c's default configuration wants
+# partition_read(part, offset, buf, size), i.e. AAPCS (r0=name, r1:r2=offset,
+# r3=buf, [sp]=size). This LK does not have it. What it has instead is a 5-argument
 # primitive at 0x4C45DC8C taking
 #
 #     (r0=name, r1=?, r2:r3=offset, [sp]=buf, [sp+4]=size)
@@ -145,9 +145,9 @@ CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS=0x4C45C1C4
 # which is confirmed by set_env's own call into the write twin at 0x4C45DDD8:
 # sub_5DDD8("env", 0x4000, 0x20000, buf, 0x4000), where the second and fifth arguments
 # are both the length and the third is the offset. The two layouts disagree about which
-# register holds the buffer, so pointing this at 0x4C45DC8C would hand stage1 a
-# pointer it never intended and read out of bounds. It is left unset rather than set
-# wrong.
+# register holds the buffer, so pointing that symbol at 0x4C45DC8C would hand stage1 a
+# pointer it never intended and read out of bounds. gale therefore uses the legacy
+# partition API below instead.
 #
 # Everything in partition.c has been identified and cross-checked:
 #
@@ -165,25 +165,37 @@ CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS=0x4C45C1C4
 #   0x4C4696B8  mt_part_get_device() candidate: loads a pointer from a literal,
 #                                  dereferences it and returns the device
 #
-# Because the index/offset/size trio is now fully known, USE_LEGACY_PARTITION_API=y is
-# a viable route and needs
+# Because the index/offset/size trio is fully known, and because the default
+# configuration's partition_read() does not exist on this LK at all, gale uses the
+# legacy partition API. Same mode amazon's austin and ford use.
+CONFIG_USE_LEGACY_PARTITION_API=y
+CONFIG_PARTITION_GET_INDEX_ADDRESS=0x4C45C120
+CONFIG_PARTITION_GET_OFFSET_ADDRESS=0x4C45BB90
+CONFIG_PARTITION_GET_SIZE_ADDRESS=0x4C45BBEC
+CONFIG_MT_PART_GET_DEVICE_ADDRESS=0x4C4696B8
+
+# With USE_LEGACY_PARTITION_API set, CONFIG_PARTITION_READ_ADDRESS and
+# CONFIG_PARTITION_GET_SIZE_BY_NAME_ADDRESS both drop out of Kconfig
+# (`depends on !USE_MT_PART_API && !USE_LEGACY_PARTITION_API`), so the prompt that
+# started this is gone. The former value 0x4C45C1C4 is kept documented above because it
+# is still the correct name -> size mapping, just no longer the one stage1 calls.
 #
-#   CONFIG_USE_LEGACY_PARTITION_API=y
-#   CONFIG_PARTITION_GET_INDEX_ADDRESS=0x4C45C120
-#   CONFIG_PARTITION_GET_OFFSET_ADDRESS=0x4C45BB90
-#   CONFIG_PARTITION_GET_SIZE_ADDRESS=0x4C45BBEC
-#   CONFIG_MT_PART_GET_DEVICE_ADDRESS=0x4C4696B8   (unconfirmed)
+# struct device_t was verified field by field against include/lib/mt_part.h, which is
+# the only thing that made enabling this safe:
 #
-# but that mode also calls dev->read(...) through include/lib/mt_part.h's
-# struct device_t, whose layout has not been verified against LK's. That layout is a
-# silent memory-corruption risk if wrong, so the flag is not set here until it is
-# checked.
+#   +0x00 init       0x4C4696B8 writes 1 here after calling init_dev
+#   +0x04 id         loaded and passed as init_dev's argument
+#   +0x08 blkdev     0x4C4696DC / 0x4C4696EC dereference [dev+8] then [+0x14]/[+0x18]
+#   +0x0C init_dev   ldr r3,[r0,#0xc] ; blx r3
+#   +0x10 read       0x4C4696FC: ldr r1,[r0,#0x10] ; blx r1
+#   +0x14 write      0x4C469764: ldr r4,[r0,#0x14] ; blx r4
 #
-# CONFIG_PARTITION_READ_ADDRESS therefore stays at the Kconfig default of 0. That 0 is
-# not an address: stage1/common.c checks for it and returns -1 rather than calling
-# through address 1, so the build stops being interactive and the device boots
-# normally, just without kaeru loading itself. Filling the value in later needs no
-# further code change.
+# 0x4C4696B8 also lazily initialises the device before returning it, which is why
+# stage1's `dev->init != 1` check passes.
+#
+# dev->read()'s last argument is the partition type, and stage1 passes USER_PART (8).
+# gale is eMMC (93 "mmc" references in the image against 2 for "ufs"), so that is the
+# right selector here rather than a UFS LUN.
 
 CONFIG_MEDIATEK_MT6768=y
 CONFIG_XIAOMI_GALE=y

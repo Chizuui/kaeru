@@ -337,6 +337,48 @@ Two things differ from `earth`, and both matter:
 This patch is gated behind the spoof being enabled, so disabling the spoof leaves the
 cmdline reporting the real state.
 
+### Partition API
+
+`gale` sets `CONFIG_USE_LEGACY_PARTITION_API=y`, the same mode `amazon`'s `austin` and
+`ford` use. The default mode does not work here: it calls
+`partition_read(part, offset, buf, size)` as AAPCS `(r0, r1:r2, r3, [sp])`, and this LK
+has no such function. Its primitive at `0x4C45DC8C` takes
+`(r0=name, r1=?, r2:r3=offset, [sp]=buf, [sp+4]=size)`, pinned by `set_env`'s own call
+into the write twin: `sub_5DDD8("env", 0x4000, 0x20000, buf, 0x4000)`. The buffer lands
+in a different register, so reusing it would make stage1 read out of bounds.
+
+Everything in `partition.c` was identified:
+
+| Address | Role | Evidence |
+|---|---|---|
+| `0x4C45C120` | name → index | `strcmp` loop, stride `0x30`, four name slots per entry at `+0x0 +0xC +0x18 +0x24` |
+| `0x4C45C1C4` | name → size | `bl 0x4C45C120 ; pop.w {r3,lr} ; b.w 0x4C45BBEC` — a tail call, not a return |
+| `0x4C45C1D4` | name → offset | tail-calls `0x4C45BB90` |
+| `0x4C45C1E4` | "not found" | `index == -1` via `clz`/`lsr` |
+| `0x4C45C1F8` | name → blockdev | tail-calls `0x4C45BB0C` |
+| `0x4C45BB0C` | index → part | `index <= 0x7F ? table[index] : -1`, stride `0x20` |
+| `0x4C45BB90` | index → offset | via `0x4C4696B8` |
+| `0x4C45BBEC` | index → size | block size × sector count, `-1` on failure |
+| `0x4C45DC8C` | read, 5 args | not usable as `partition_read` |
+| `0x4C45DDD8` | write, 5 args | sets the 5-arg shape |
+| `0x4C4696B8` | `mt_part_get_device()` | returns the device, lazily initialising it |
+
+Enabling this mode required `struct device_t` to match `include/lib/mt_part.h`, since
+stage1 calls `dev->read()` through it. Verified field by field:
+
+| Offset | Field | Evidence |
+|---|---|---|
+| `+0x00` | `init` | `0x4C4696B8` writes `1` here after calling `init_dev` |
+| `+0x04` | `id` | loaded and passed as `init_dev`'s argument |
+| `+0x08` | `blkdev` | `0x4C4696DC` / `0x4C4696EC` dereference `[dev+8]` then `[+0x14]`/`[+0x18]` |
+| `+0x0C` | `init_dev` | `ldr r3,[r0,#0xc] ; blx r3` |
+| `+0x10` | `read` | `0x4C4696FC`: `ldr r1,[r0,#0x10] ; blx r1` |
+| `+0x14` | `write` | `0x4C469764`: `ldr r4,[r0,#0x14] ; blx r4` |
+
+`dev->read()`'s last argument is the partition type and stage1 passes `USER_PART` (8).
+`gale` is eMMC — 93 `mmc` references in the image against 2 for `ufs` — so that is the
+right selector rather than a UFS LUN.
+
 ## Not yet implemented
 
 - **`load_and_verify_vbmeta`.** `board-earth.c` patches three spots so any vbmeta
