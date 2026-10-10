@@ -482,17 +482,40 @@ differing halfwords are branch immediates:
 0x4C464CFC  88 E6        b      #0x4C464A10
 ```
 
-Same instruction shapes, different branch targets, because the two builds lay the
-surrounding code out differently. Searching for `earth`'s exact four halfwords returns
-zero hits, which is why this function was previously recorded as absent from `gale`. A
-search built from this image's own bytes, `F47F AE6B E688 F8DD`, returns exactly one hit.
+Same instruction shapes, different branch targets. Searching for `earth`'s exact four
+halfwords returns zero hits, which is why this function was previously recorded as absent
+from `gale`. A search built from this image's own bytes, `F47F AE6B E688 F8DD`, returns
+exactly one hit.
 
-Both of `earth`'s applicable offsets were re-derived rather than copied:
+`board-fire.c` (Redmi 12 4G) turns out to use that same signature and the same `+0x72`, so
+`fire` and `gale` share an AVB layout while `earth` and `ruby` do not. That is what made
+the third offset findable:
+
+| Offset | Board | Address here | Instruction |
+|---|---|---|---|
+| `-0x320` | `earth`, `ruby` | `0x4C4649D8` | `lsrs` — not a comparison |
+| `-0x32C` | `fire` | `0x4C4649CC` | `cmp r2, r3` — the real check |
+
+Copying `earth`'s `-0x320` would write a compare over an unrelated shift instruction. The
+three patches are:
 
 | Offset | Bytes | Instruction | Patch |
 |---|---|---|---|
+| `-0x32C` | `9A 42` (`0x429A`) | `cmp r2, r3` | `PATCH_MEM(,0x451B)` |
 | `+0x00` | `7F F4 6B AE` | `bne.w #0x4C4649D2` | `NOP(,2)` |
 | `+0x72` | `00 2B` (`0x2B00`) | `cmp r3, #0` | `PATCH_MEM(,0x2301)` |
+
+`0x451B` is `cmp r3, r3`, always equal, which is what the chained-key length check needs.
+It is followed by a `beq.w` that skips the error, so forcing it equal always lands on the
+accepted path:
+
+```
+0x4C4649CC  9A 42        cmp   r2, r3       <- -0x32C, chained-key length check
+0x4C4649CE  00 F0 8C 81  beq.w 0x4C464CEA   ; equal -> skip error
+0x4C4649D2  DF F8 84 09  ldr.w r0, [pc, #0x984]
+0x4C4649D6  4F F0 05 09  mov.w sb, #5
+0x4C4649DC  01 F0 A8 FF  bl    0x4C466930
+```
 
 `+0x00` is NOPped, so the unconditional `b` at `+0x04` is always taken. `+0x72` is the
 `key_is_trusted` test, immediately followed by `bne.w`, and rewriting it as
@@ -572,11 +595,6 @@ boot in that case.
 
 ## Not yet implemented
 
-- **`load_and_verify_vbmeta`, third patch.** The key check is now patched; see
-  [Accepting any vbmeta signing key](#accepting-any-vbmeta-signing-key). What remains is
-  `earth`'s `-0x32C` chained-key length check, which cannot be located on this build.
-  Expected consequence on an SBC-enabled device: chained vbmeta still fails, though
-  plain signed vbmeta should now verify.
 - **AVB device state published to fastboot.** Separate from the cmdline above. The
   function is `0x4C42BEC0` (it starts by printing `"fastboot_init()\n"`). The
   device-state decision calls the two lock-state adapters at `0x4C42C376` and

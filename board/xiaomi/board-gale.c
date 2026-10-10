@@ -151,6 +151,12 @@
 // instruction stream.
 #define CMDLINE_STATE_RANGE     0x0A
 
+// Offset of the chained-key length test inside load_and_verify_vbmeta, measured from the
+// match above. The instruction there is 0x429A, "cmp r2, r3", followed by "beq.w" that
+// skips the error. board-earth.c and board-ruby.c use -0x320 for this; that lands on
+// 0x4C4649D8 here, which is "lsrs", not a comparison. board-fire.c uses -0x32C, which
+// lands on the real check. The patch value 0x451B is "cmp r3, r3", always equal.
+#define VBMETA_CHAIN_KEY_LEN     (-0x32C)
 // Offset of the key_is_trusted test inside load_and_verify_vbmeta, measured from the
 // match above. The instruction there is 0x2B00, "cmp r3, #0", immediately followed by
 // "bne.w", so forcing r3 to 1 takes the branch that accepts the key.
@@ -282,13 +288,19 @@ static void spoof_lock_state(void) {
     // "invalid pubk size" and "vbmeta_a : Public key used to sign data rejected" come
     // from. Without this the boot never gets past AVB.
     //
-    // Only two of board-earth.c's three patches apply here. The third one rewrites a
-    // chained-key length check at -0x32C; that offset in gale holds a different
-    // comparison and gale has no "cmp r2, r3" anywhere near, so it is left alone rather
-    // than guessed. See docs/gale.md.
+    // Only board-fire.c's three patches apply here. board-earth.c and board-ruby.c
+    // use -0x320, which on this image lands on 0x4C4649D8 = "lsrs", not a comparison
+    // at all. board-fire.c uses -0x32C, and that lands on 0x4C4649CC = "cmp r2, r3",
+    // which is the chained-key length check. See docs/gale.md.
     addr = SEARCH_PATTERN(LK_START, LK_END, SIG_LOAD_VERIFY_VBMETA);
     if (addr) {
         printf("Found load_and_verify_vbmeta at 0x%08X\n", addr);
+
+        // The chained-key path compares key lengths before it calls memcmp, and on a
+        // mismatch skips straight to the error. Rewriting "cmp r2, r3" as
+        // "cmp r3, r3" makes the length check always succeed, so the memcmp path is
+        // reached and the NOP below decides the outcome.
+        PATCH_MEM(addr + VBMETA_CHAIN_KEY_LEN, 0x451B);  // cmp r2, r3 -> cmp r3, r3
 
         // NOP the bne.w at +0x00 (2 halfwords = the full 4-byte instruction), so the
         // following unconditional branch is always taken.
