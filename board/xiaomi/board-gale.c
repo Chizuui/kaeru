@@ -202,7 +202,21 @@ static void spoof_lock_state(void) {
 }
 
 // kaeru bootloader lock spoofing control command.
-FASTBOOT_CMD(bldr_spoof, "oem bldr_spoof", cmd_spoof_bootloader_lock, 0);
+//
+// The trailing argument is LK's allowed_when_security_on flag, not "requires unlock".
+// Leaving it at 0 makes the fastboot dispatcher take this path at 0x4C42B994:
+//
+//     ldr  r3, [r7, #0xc]     ; cmd->allowed_when_security_on
+//     cmp  r3, #0
+//     bne  0x4C42B962          ; flag set -> run the handler
+//     bl   fastboot_fail       ; "not support on security" (NOPped above, so silent)
+//     b    0x4C42B89A          ; loop continue, command never runs
+//
+// NOPping fastboot_fail only suppresses the message; the command is still skipped.
+// It must be 1, which also makes the dispatcher's second gate
+// (ldr r3, [r7, #0x10] = forbidden_when_lock_on) reachable, since that one is only
+// evaluated once allowed_when_security_on passes.
+FASTBOOT_CMD(bldr_spoof, "oem bldr_spoof", cmd_spoof_bootloader_lock, 1);
 
 void board_early_init(void) {
     printf("Entering early init for Redmi 13C (gale)\n");

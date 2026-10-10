@@ -243,7 +243,34 @@ explicitly:
   still function. `vbmeta.device_state` is deliberately left alone — rewriting it to
   `unlocked` hangs recovery on some devices.
 - **Fastboot.** The two refusal messages and the security gate are removed, so
-  fastboot commands keep working even though the spoofed state reads `locked`.
+  fastboot commands keep working even though the spoofed state reads `locked`. The
+  `oem bldr_spoof` command itself is registered with `allowed_when_security_on = 1`;
+  see [below](#the-bldr_spoof-command-needs-allowed_when_security_on-1).
+
+### The `bldr_spoof` command needs `allowed_when_security_on = 1`
+
+The last argument to `FASTBOOT_CMD` is not "requires unlock" — it is LK's
+`allowed_when_security_on`, passed straight through by `fastboot_register()`. With it
+at `0`, LK's dispatcher takes this path at `0x4C42B994`:
+
+```
+0x4C42B994  ldr  r3, [r7, #0xc]   ; cmd->allowed_when_security_on
+0x4C42B996  cmp  r3, #0
+0x4C42B998  bne  0x4C42B962        ; flag set -> run the handler
+0x4C42B99A  ldr  r0, ="not support on security"
+0x4C42B99E  bl   fastboot_fail     ; NOPped by board-gale.c, so silent
+0x4C42B9A2  ldr  r4, [r5]
+0x4C42B9A4  b    0x4C42B89A        ; loop continue - the command never runs
+```
+
+`r7` is the command pointer and `0x4C42B962` is the handler, so this is confirmed
+against the image rather than inferred. Note that NOPping `fastboot_fail` only
+suppresses the message; the command is still skipped. Setting the flag to `1` takes the
+`bne`, and it also makes the dispatcher's second gate — `ldr r3, [r7, #0x10]`,
+`forbidden_when_lock_on` — reachable at all, since that one is only evaluated once
+`allowed_when_security_on` has passed.
+
+`board-merlin.c` already uses `1`; `board-earth.c` uses `0`.
 
 Without the fastboot patch, spoofing alone makes fastboot reject commands with
 *"not support on security"* and *"not allowed in locked state"* on a device that is
