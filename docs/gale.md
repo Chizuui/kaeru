@@ -7,9 +7,10 @@ was obtained, and what is still missing.
 > [!CAUTION]
 > Read the [kaeru wiki](https://github.com/R0rt1z2/kaeru/wiki) before flashing
 > anything. Modifying a bootloader can permanently brick the device. These notes
-> describe an **unverified** port: the offsets are derived from this device's own
-> image, but no patched image has been built and booted yet, and the vbmeta key
-> check listed under [Not yet implemented](#not-yet-implemented) is still missing.
+> describe a port that is still being validated on hardware; offsets are derived from
+> this device's own image, and the warning-suppression patch has been confirmed on
+> hardware by a collaborator rather than by this repository. See
+> [Not yet implemented](#not-yet-implemented) for the parts that are known incomplete.
 
 ## Device
 
@@ -406,25 +407,120 @@ stage1 calls `dev->read()` through it. Verified field by field:
 `gale` is eMMC — 93 `mmc` references in the image against 2 for `ufs` — so that is the
 right selector rather than a UFS LUN.
 
+## Removing the unlock warning
+
+Two separate things are going on, and only one of them is the warning.
+
+The spoof makes `fastboot getvar unlocked` report `no` and the OS report `unlocked`. The
+orange splash is a third thing: LK reads the same boot-state global that feeds the
+`androidboot.verifiedbootstate=` value and draws a warning screen from it. Forcing the
+cmdline value green does not touch the screen, and vice versa.
+
+Three sites were tried, in order, and the lesson is that the dispatch point is the only
+one that works:
+
+| Patch | Address | Result |
+|---|---|---|
+| pin state in `cmdline_pre_process` | `0x4C454762` | kernel told `green`, screen unchanged |
+| pin state in the boot-state printer | `0x4C454552` | log line renamed, screen unchanged |
+| stub the Orange State screen | `0x4C4545D4` | plausible, never confirmed |
+| **force `orange_state_warning` to return 0** | `0x4C4546F4` | **confirmed on hardware** |
+
+The first two fail for the same reason. `cmdline_pre_process` and the boot-state printer
+share a prologue, `B508 4B11 447B 681B` and `B508 4B1C 447B 681B`, one hit each, differing
+only in the second halfword. Both switch on the boot state and both have their `cmp r3, #3`
+at `+0x0A`, which is what the two halfword patch rewrites. But the printer always returns
+`0` from every one of its arms, including the orange one, so its caller at `0x4C46831C`
+takes `cbz r0` unconditionally. The `0x10007000` boot-state code that caller carries is
+dead on this path, and pinning the state only renames the log line.
+
+The screen at `0x4C4545D4` has no `BL` caller anywhere in the payload, which is why the
+caller cannot be found by scanning for callers. It is not called, it is tail-called:
+
+```
+0x4C4546FE  02 2B        cmp   r3, #2
+0x4C454700  0B D0        beq   0x4C45471A
+0x4C454702  03 2B        cmp   r3, #3
+0x4C454704  03 D0        beq   0x4C45470E
+0x4C454706  01 2B        cmp   r3, #1
+0x4C454708  01 D0        beq   0x4C45470E
+0x4C45470A  00 20        movs  r0, #0
+0x4C45470C  08 BD        pop   {r3, pc}
+0x4C45471A  BD E8 08 40  pop.w {r3, lr}
+0x4C45471E  FF F7 59 BF  b.w   0x4C4545D4     ; Orange State screen + 5s delay
+```
+
+`orange_state_warning()` at `0x4C4546F4` is the dispatcher, and `b.w` at `+0x2A` is the
+tail call into the screen. Forcing it to return `0` skips the state dispatch entirely, so
+orange, yellow and red are all bypassed at one point, and it sits above the two functions
+whose patches did nothing.
+
+It is found by the third prologue in the group, `B508 4B0E 447B`, again one hit. The three
+signatures cannot collide, since the second halfword differs.
+
+Credit: `wulan17`, commit [`0a7ed94`](https://github.com/wulan17/kaeru/commit/0a7ed9481fb4fdbc5377716be8be48eb8ef849e8)
+in his fork, confirmed on hardware. The screen stub that briefly lived here in `6dd8840`
+has been removed, since it was superseded and never confirmed.
+
+## Accepting any vbmeta signing key
+
+The lock spoof reports the device as locked, and a locked device treats a vbmeta signed
+with an unrecognised key as fatal. That is where the observed `invalid pubk size` and
+`vbmeta_a : Public key used to sign data rejected` come from, and it happens before the
+board file's other AVB work matters. `board-gale.c` forces the key to be accepted.
+
+`load_and_verify_vbmeta()` is reached through a pointer, not called directly, so it is
+matched mid-function. The match sits at `0x4C464CF8`, inside a function whose entry is at
+`0x4C462708`, so the offset from entry is `+0x25F0`.
+
+The obvious move is to reuse `board-earth.c`'s signature verbatim. **It does not match.**
+`earth` searches `F47F AE71 E68D F8DD`; this image holds `F47F AE6B E688 F8DD`. The two
+differing halfwords are branch immediates:
+
+```
+0x4C464CF8  7F F4 6B AE   bne.w  #0x4C4649D2
+0x4C464CFC  88 E6        b      #0x4C464A10
+```
+
+Same instruction shapes, different branch targets, because the two builds lay the
+surrounding code out differently. Searching for `earth`'s exact four halfwords returns
+zero hits, which is why this function was previously recorded as absent from `gale`. A
+search built from this image's own bytes, `F47F AE6B E688 F8DD`, returns exactly one hit.
+
+Both of `earth`'s applicable offsets were re-derived rather than copied:
+
+| Offset | Bytes | Instruction | Patch |
+|---|---|---|---|
+| `+0x00` | `7F F4 6B AE` | `bne.w #0x4C4649D2` | `NOP(,2)` |
+| `+0x72` | `00 2B` (`0x2B00`) | `cmp r3, #0` | `PATCH_MEM(,0x2301)` |
+
+`+0x00` is NOPped, so the unconditional `b` at `+0x04` is always taken. `+0x72` is the
+`key_is_trusted` test, immediately followed by `bne.w`, and rewriting it as
+`movs r3, #1` makes the branch take the accepted path:
+
+```
+0x4C464D5A  01 2C        cmp   r4, #1
+0x4C464D5C  00 F0 8C 82  beq.w 0x4C465278
+0x4C464D60  00 2C        cmp   r4, #0
+0x4C464D62  40 F0 92 82  bne.w 0x4C46528A
+0x4C464D66  DC F8 00 30  ldr.w r3, [ip]
+0x4C464D6A  00 2B        cmp   r3, #0        <- +0x72
+0x4C464D6C  7F F4 50 AE  bne.w 0x4C464A10    <- accepted path
+```
+
+`earth`'s third patch, at `-0x32C`, rewrites a chained-key length check. It is **not**
+applied here: that offset in this build holds a different comparison, and there is no
+`cmp r2, r3` anywhere near the function to anchor a replacement. Leaving it out is
+deliberate, since a wrong guess at a length check corrupts the parse rather than
+loosening it.
+
 ## Not yet implemented
 
-- **`load_and_verify_vbmeta`.** `board-earth.c` patches three spots so any vbmeta
-  public key is accepted. The signature is present exactly once, at `0x4C464CF8`
-  inside `sub_6463C` (5298 bytes, called from `sub_65E0E`), and two of earth's three
-  offsets carry over unchanged:
-
-  | Offset | `earth` | `gale` | Status |
-  |---|---|---|---|
-  | `+0x00` | `NOP(,2)` — `BNE.W` | `bne.w #0x4C4649D2` | applies as-is |
-  | `+0x72` | `PATCH_MEM(,0x2301)` — `cmp r3,#0` | `cmp r3, #0` | applies as-is |
-  | `-0x32C` | `PATCH_MEM(,0x451B)` — `cmp r2, r3` | `cmp r2, sl` | **not derived** |
-
-  The third spot is where `earth` rewrites the chained-key length check into
-  `cmp r3, r3` so it can never fail. On `gale` that offset holds a different
-  comparison, and there is **no `cmp r2, r3` anywhere in the function**, so the
-  key-length check has to be re-identified from scratch rather than offset-shifted.
-  That was left alone rather than guessed. Consequence: on an SBC-enabled device the
-  spoof may still hit *"Public key used to sign data rejected"*.
+- **`load_and_verify_vbmeta`, third patch.** The key check is now patched; see
+  [Accepting any vbmeta signing key](#accepting-any-vbmeta-signing-key). What remains is
+  `earth`'s `-0x32C` chained-key length check, which cannot be located on this build.
+  Expected consequence on an SBC-enabled device: chained vbmeta still fails, though
+  plain signed vbmeta should now verify.
 - **AVB device state published to fastboot.** Separate from the cmdline above. The
   function is `0x4C42BEC0` (it starts by printing `"fastboot_init()\n"`). The
   device-state decision calls the two lock-state adapters at `0x4C42C376` and

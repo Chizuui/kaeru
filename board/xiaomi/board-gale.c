@@ -45,20 +45,33 @@
 // trusted" screen. The two differ only in the second halfword, 0x4B1C against 0x4B11, so
 // SIG_CMDLINE_PREPROC does not match it.
 #define SIG_BOOT_STATE_SHOW  0xB508, 0x4B1C, 0x447B, 0x681B
-// The function that actually draws the Orange State screen. It sits 0x8C bytes past the
-// printer above, prints two strings (0x4C4545EE "Orange State", 0x4C4545F6 "Your device has
-// been unlocked and can't be trusted"), drives the display, and returns 0.
-//
-// It has no BL caller anywhere in the payload, so the caller cannot be redirected. It is
-// stubbed instead. Pinning the printer's state does not help: every one of its arms,
-// including the orange one, ends at 0x4C454564 which is "movs r0, #0 / pop {r3, pc}", so it
-// always returns 0 and the warning is not gated on its result at all.
+// orange_state_warning(): the dispatcher that decides whether to show the boot-time
+// unlock warning. Shares the 0xB508 prologue with the two functions above, differing only
+// in the second halfword, 0x4B0E against 0x4B11 and 0x4B1C, so the three never collide.
+// This is the correct place to cut the warning, and the one confirmed on hardware.
+#define SIG_ORANGE_STATE_WARNING  0xB508, 0x4B0E, 0x447B
+// The screen orange_state_warning() tail-calls for state 2. Listed only for reference;
+// it is reached through a tail branch rather than a BL, which is why earlier attempts to
+// find its caller by scanning BL came up empty.
 #define SIG_ORANGE_SCREEN   0xB508, 0xF7EC, 0xF97F, 0xF7B1, 0xF89F
 // the printf inside platform_init that reports "ENV init"; runs once the
 // environment is ready, which is the earliest point get_env() returns non-NULL
 #define SIG_ENV_INIT_PRINTF  0xF03D, 0xF8D5, 0x6823, 0x2000
 // dm-verity corruption warning shown while booting
 #define SIG_DM_VERITY        0xB530, 0xB083, 0xAB02, 0x2200
+// load_and_verify_vbmeta(): the AVB public-key check. On this build it sits mid-function
+// at 0x4C464CF8, inside a function whose entry is at 0x4C462708.
+//
+// gale's bytes are 0xF47F, 0xAE6B, 0xE688, 0xF8DD. board-earth.c searches for
+// 0xF47F, 0xAE71, 0xE68D, 0xF8DD, which does not match here: the two differing halfwords
+// are branch immediates, so the instruction shapes are identical but the branch targets
+// are not. That is why the check was previously recorded as absent.
+//
+// Both of earth's applicable offsets were re-derived against this image rather than copied:
+//
+//     addr + 0x00   7F F4 6B AE   bne.w #0x4C4649D2
+//     addr + 0x72   00 2B         cmp r3, #0        (halfword 0x2B00)
+#define SIG_LOAD_VERIFY_VBMETA  0xF47F, 0xAE6B, 0xE688, 0xF8DD
 // avb_add_cmdline_options(): the function that assembles
 // androidboot.vbmeta.device_state=... for the kernel cmdline
 #define SIG_AVB_CMDLINE      0xE92D, 0x4FF0, 0x4691, 0xF102
@@ -121,14 +134,14 @@
 // instruction stream.
 #define CMDLINE_STATE_RANGE     0x0A
 
+// Offset of the key_is_trusted test inside load_and_verify_vbmeta, measured from the
+// match above. The instruction there is 0x2B00, "cmp r3, #0", immediately followed by
+// "bne.w", so forcing r3 to 1 takes the branch that accepts the key.
+#define VBMETA_KEY_TRUSTED      0x72
+
 // Same offset in the boot-state display function, whose prologue is identical. See
 // SIG_BOOT_STATE_SHOW.
 #define BOOT_STATE_SHOW_RANGE   0x0A
-
-// Stub for the Orange State screen function: movs r0, #0 / bx lr, over its first two
-// halfwords (push {r3, lr} plus the first half of a bl). It already returned 0, so the
-// calling convention is unchanged; only the warning itself is skipped.
-#define ORANGE_SCREEN_STUB     0x2000, 0x4770
 
 // Offset inside avb_add_cmdline_options(), measured from its entry above. This is
 // the CBNZ that picks between the "locked" and "unlocked" strings:
@@ -245,6 +258,30 @@ static void spoof_lock_state(void) {
         printf("Patched %d custom_get_lock_state call(s) in adapter B\n", n);
     }
 
+    // Accept any vbmeta signing key.
+    //
+    // The spoof reports the device as locked, and a locked device treats a vbmeta signed
+    // with an unrecognised key as fatal, which is where the observed
+    // "invalid pubk size" and "vbmeta_a : Public key used to sign data rejected" come
+    // from. Without this the boot never gets past AVB.
+    //
+    // Only two of board-earth.c's three patches apply here. The third one rewrites a
+    // chained-key length check at -0x32C; that offset in gale holds a different
+    // comparison and gale has no "cmp r2, r3" anywhere near, so it is left alone rather
+    // than guessed. See docs/gale.md.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_LOAD_VERIFY_VBMETA);
+    if (addr) {
+        printf("Found load_and_verify_vbmeta at 0x%08X\n", addr);
+
+        // NOP the bne.w at +0x00 (2 halfwords = the full 4-byte instruction), so the
+        // following unconditional branch is always taken.
+        NOP(addr, 2);
+
+        // cmp r3, #0 -> movs r3, #1, so key_is_trusted is always non-zero and the branch
+        // after it takes the accepted path.
+        PATCH_MEM(addr + VBMETA_KEY_TRUSTED, 0x2301);
+    }
+
     // libavb appends androidboot.vbmeta.device_state to the kernel cmdline, and it
     // keeps reporting "unlocked" because the state it reads is the real one, not the
     // spoofed one the lock shim hands out. Forcing the "locked" string keeps the
@@ -316,23 +353,27 @@ static void spoof_lock_state(void) {
             PATCH_MEM(addr + BOOT_STATE_SHOW_RANGE, 0x2300);
         }
 
-        // Stub the screen itself. This is what removes the lock warning.
+// Suppress the boot-time unlock warning. This is the one that actually works.
         //
-        // The state pin above only renames the log line. Every arm of the printer,
-        // including the orange one, ends at 0x4C454564 = "movs r0, #0 / pop {r3, pc}", so
-        // the function returns 0 whichever state it prints, and its caller at 0x4C46831C
-        // takes "cbz r0" unconditionally. The 0x10007000 boot-state code that caller
-        // carries is therefore dead on this path, and the warning is raised from the
-        // display code instead - the log shows mt_disp_show_boot_logo reporting
-        // g_boot_state=2 immediately after the "boot state: orange" line.
+        // orange_state_warning() is the dispatcher: it reads the same boot-state global,
+        // and for state 2 (orange) it tail-calls the Orange State screen at 0x4C4545D4,
+        // which prints the warning and adds the 5 second delay:
         //
-        // Replacing the entry with "movs r0, #0 / bx lr" skips drawing and printing while
-        // returning the same 0 the real function returns, so nothing downstream changes
-        // except that the warning never gets shown.
-        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_ORANGE_SCREEN);
+        //     0x4C4546FE  cmp   r3, #2
+        //     0x4C454700  beq   0x4C45471A
+        //     0x4C45471A  pop.w {r3, lr}
+        //     0x4C45471E  b.w   0x4C4545D4     ; Orange State screen + delay
+        //
+        // Forcing it to return 0 skips the state dispatch entirely, so the orange, yellow
+        // and red paths are all bypassed at one point.
+        //
+        // Credit: wulan17, commit 0a7ed94 in his fork, which was confirmed on hardware.
+        // Earlier attempts here pinned the state in the printer and stubbed the screen;
+        // both sit below this dispatcher and only cover part of it.
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_ORANGE_STATE_WARNING);
         if (addr) {
-            printf("Found Orange State screen at 0x%08X, stubbing it\n", addr);
-            PATCH_MEM(addr, ORANGE_SCREEN_STUB);
+            printf("Found orange_state_warning at 0x%08X, suppressing warning\n", addr);
+            FORCE_RETURN(addr, 0);
         }
     }
 }
