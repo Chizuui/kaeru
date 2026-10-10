@@ -56,6 +56,27 @@
 #define FB_FAIL_NOT_ALLOWED     0x17C   // BL fastboot_fail, "not allowed in locked state"
 #define FB_SECURITY_GATE        0x12A   // BL sec_usbdl_enabled, branches into the handler
 
+// Offset inside cmdline_pre_process(), measured from its entry above. The function reads a
+// boot-state byte, checks it is in range, then dispatches with tbb:
+//
+//     +0x0A  cmp  r3, #3
+//     +0x0C  bhi  +0x20               ; out of range -> append nothing
+//     +0x0E  tbb  [pc, r3]
+//
+// The four arms resolve, in this image, to:
+//     state 0 -> "androidboot.verifiedbootstate=green"
+//     state 1 -> "androidboot.verifiedbootstate=yellow"
+//     state 2 -> "androidboot.verifiedbootstate=orange"
+//     state 3 -> "androidboot.verifiedbootstate=red"
+//
+// The cross-check is the recovery config: CONFIG_RECOVERY_CMDLINE2_ADDRESS is 0x4C5163F4,
+// which is exactly the address of the "green" string.
+//
+// Replacing the range check with "movs r3, #0" pins the dispatch to green. movs sets Z and
+// clears C, so the bhi is not taken and tbb reads index 0. One halfword, no shift in the
+// instruction stream.
+#define CMDLINE_STATE_RANGE     0x0A
+
 // Offset inside avb_add_cmdline_options(), measured from its entry above. This is
 // the CBNZ that picks between the "locked" and "unlocked" strings:
 //
@@ -194,6 +215,28 @@ static void spoof_lock_state(void) {
         if (addr) {
             printf("Found cmdline_pre_process at 0x%08X\n", addr);
             PATCH_CALL(addr, (void *)handle_recovery_boot, TARGET_THUMB);
+        }
+    } else {
+        // Pin androidboot.verifiedbootstate to green.
+        //
+        // With the spoof on, the restored function runs but still dispatches to orange,
+        // because the boot-state byte it reads is not the one the patched getters produce.
+        // A log from the test run shows both values in the same boot:
+        //
+        //     [3463] [AVB20] lock_state = 0x3      LKS_SECURITY_LOCKED, the spoofed value
+        //     [3684] boot state: orange             driven by something else
+        //     dump lock_state, 0x0                  LKS_UNLOCKED, the real value
+        //     androidboot.verifiedbootstate=orange  what the kernel is then told
+        //
+        // verifiedbootstate is what becomes ro.boot.verifiedbootstate, which is what init
+        // and most apps read, so leaving it at orange is the spoof failing where it counts.
+        // The reader behind the orange decision has not been located, so instead of chasing
+        // it the dispatch itself is pinned.
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
+        if (addr) {
+            printf("Found cmdline_pre_process at 0x%08X, forcing green state\n", addr);
+            // cmp r3, #3  ->  movs r3, #0
+            PATCH_MEM(addr + CMDLINE_STATE_RANGE, 0x2300);
         }
     }
 }
