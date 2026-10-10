@@ -166,7 +166,7 @@ identity.
 
 ## Board file
 
-`board/xiaomi/board-gale.c` follows the approach of `board-earth.c`. All thirteen
+`board/xiaomi/board-gale.c` follows the approach of `board-earth.c`. All twelve
 `SEARCH_PATTERN` signatures resolve to **exactly one hit** in this image, which was
 verified before committing.
 
@@ -184,7 +184,6 @@ verified before committing.
 | `E92D 4FF0 4691 F102` | `0x4C462260` | `avb_add_cmdline_options()` |
 | `B508 F7FF FF63 F3C0` | `0x4C417B58` | `get_vfy_policy()` |
 | `B508 F7FF FF5D F000` | `0x4C417B64` | `get_dl_policy()` |
-| `F005 0301 F083 0A01 930D 9B70` | `0x4C465E5A` | `avb_slot_verify()` allow-error gate |
 
 The two policy signatures are the ones `board-earth.c` uses, and they each match once.
 They are forced to return `0` unconditionally, as on `earth`: image authentication has
@@ -406,52 +405,6 @@ stage1 calls `dev->read()` through it. Verified field by field:
 `dev->read()`'s last argument is the partition type and stage1 passes `USER_PART` (8).
 `gale` is eMMC — 93 `mmc` references in the image against 2 for `ufs` — so that is the
 right selector rather than a UFS LUN.
-
-### AVB must be told to tolerate verification errors
-
-Reporting the device as locked makes AVB fatal: a bad signature, hash mismatch,
-rollback or rejected key aborts the boot. On the first flash with the spoof enabled,
-`mt_boot_app()` never issued the hand-off and the device restarted just after the logo.
-
-The log makes it unambiguous — across six boots with the spoof on, versus four with it
-off:
-
-| Marker | Spoof on | Spoof off |
-|---|---|---|
-| `for launch linux, route smc to el3` | 0 | 3 |
-| `back to gz, launch linux` | 0 | 3 |
-| `boot linux-64 via EL2` | 0 | 3 |
-| `Linux version 4.19.325-cip136-st20-Mayuri` | 0 | 2 |
-
-With the spoof off the same device boots `4.19.325-cip136-st20-Mayuri` normally.
-
-`board-gale.c` therefore forces the allow-verification-error flag, which is the same
-path AVB takes on an unlocked device:
-
-```c
-addr = SEARCH_PATTERN(LK_START, LK_END, 0xF005, 0x0301, 0xF083, 0x0A01, 0x930D, 0x9B70);
-PATCH_MEM(addr, 0xF04F, 0x0301);
-```
-
-Verified against this image rather than assumed from `merlin`:
-
-```
-0x4C465E5A  05 f0 01 03  and     r3, r5, #1     <- the signature, 4 bytes
-            83 f0 01 0a  eor     sl, r3, #1
-            0d 93        str     r3, [sp,#0x34]
-            70 9b        ldr     r3, [sp,#0x1c0]
-            03 2b        cmp     r3, #3
-            14 bf        ite     ne
-            00 23        movne   r3, #0
-            0a f0 01 03  andeq   r3, sl, #1
-            2b b1        cbz     r3, ...
-            4f f0 08 09  mov.w   sb, #8        ; the fatal return
-```
-
-`and r3, r5, #1` is literally the instruction `board-merlin.c` names in its comment,
-the match is unique, and the replacement is also 4 bytes so the instruction stream
-does not shift. Forcing `r3 = 1` makes `sl = 0`, so the `cbz` is taken and the
-`return 8` is skipped.
 
 ## Not yet implemented
 

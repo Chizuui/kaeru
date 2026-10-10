@@ -46,11 +46,6 @@
 // avb_add_cmdline_options(): the function that assembles
 // androidboot.vbmeta.device_state=... for the kernel cmdline
 #define SIG_AVB_CMDLINE      0xE92D, 0x4FF0, 0x4691, 0xF102
-// avb_slot_verify()'s allow-verification-error gate. Verified in this image: the
-// instruction at the match is literally `and r3, r5, #1`, the same one
-// board-merlin.c describes, followed by `eor sl, r3, #1` and then a branch that
-// returns error code 8 unless the flag is clear.
-#define SIG_AVB_SLOT_VERIFY  0xF005, 0x0301, 0xF083, 0x0A01, 0x930D, 0x9B70
 // get_vfy_policy() / get_dl_policy(): image authentication and download policy
 #define SIG_GET_VFY_POLICY   0xB508, 0xF7FF, 0xFF63, 0xF3C0
 #define SIG_GET_DL_POLICY    0xB508, 0xF7FF, 0xFF5D, 0xF000
@@ -160,23 +155,6 @@ static void spoof_lock_state(void) {
         // +0x12A and the dispatch at +0x15C, so the branch must cover 0x15C - 0x12A
         // - 4 = 0x2E bytes, giving imm11 = 0x17 and the encoding 0xE017.
         PATCH_MEM(addr + FB_SECURITY_GATE, 0xE017);
-    }
-
-    // AVB rejects boot images signed with a key it does not trust, for every
-    // slot. That is normally fine, but this port reports the device as locked, and a
-    // locked device treats a bad signature, hash mismatch or rejected key as fatal:
-    // mt_boot_app() refuses to hand off to the kernel and the device restarts right
-    // after the logo. Forcing the allow-verification-error flag puts AVB on the same
-    // path an unlocked device uses, so it still builds slot_data and the kernel
-    // cmdline.
-    //
-    // Without this the first boot with the spoof enabled never reaches
-    // "for launch linux, route smc to el3" in the log.
-    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_AVB_SLOT_VERIFY);
-    if (addr) {
-        printf("Found avb_slot_verify allow-error gate at 0x%08X\n", addr);
-        // and r3, r5, #1  ->  mov.w r3, #1
-        PATCH_MEM(addr, 0xF04F, 0x0301);
     }
 
     // libavb appends androidboot.vbmeta.device_state to the kernel cmdline, and it
