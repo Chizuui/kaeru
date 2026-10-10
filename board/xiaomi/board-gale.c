@@ -322,88 +322,95 @@ static void spoof_lock_state(void) {
     }
 
     // cmdline_pre_process runs just before the cmdline is handed to the kernel. It is
-    // the function that appends androidboot.verifiedbootstate: it switches on the boot
-    // state and calls append_option() once, with "green", "yellow", "orange" or "red".
+    // the function that appends androidboot.verifiedbootstate: it reads the boot state
+    // and calls append_option() once with "green", "yellow", "orange" or "red", picked
+    // through a tbb table at +0x0E.
     //
-    // PATCH_CALL overwrites the callee's first two halfwords, so hooking it this way does
-    // not add a call, it *replaces* the function. Because handle_recovery_boot() returns
-    // immediately unless the bootmode is RECOVERY, that replacement means a normal boot
-    // never runs this code at all, and the kernel is handed a cmdline with no
-    // androidboot.verifiedbootstate token whatsoever.
+    //     0x4C454762  cmp   r3, #3        <- +0x0A
+    //     0x4C454764  bhi   0x4C454776    ; state > 3 appends nothing
+    //     0x4C454766  tbb   [pc, r3]      ; 14 02 0E 08
     //
-    // That is not acceptable here. With the spoof on, this cmdline also carries
-    // androidboot.vbmeta.device_state=locked, androidboot.secureboot=1 and
-    // androidboot.veritymode.managed=yes. Verifiedbootstate is what tells init which of
-    // those it is allowed to trust, so dropping it leaves the kernel unable to reconcile
-    // them and it stalls during boot, before printing its first line.
+    //     state 0 -> 0x4C454792  verifiedbootstate=green
+    //     state 1 -> 0x4C45476E  verifiedbootstate=yellow
+    //     state 2 -> 0x4C454786  verifiedbootstate=orange
+    //     state 3 -> 0x4C45477A  verifiedbootstate=red
     //
-    // cmdline_pre_process is reached through a function pointer, not a BL, so redirecting
-    // the caller is not available and a chain would need a trampoline. Instead only hook
-    // it when recovery is actually being booted: handle_recovery_boot() does nothing
-    // except during recovery anyway, so this keeps its one useful behaviour while leaving
-    // every other boot with LK's own verifiedbootstate handling intact.
-    if (get_bootmode() == BOOTMODE_RECOVERY) {
-        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
-        if (addr) {
-            printf("Found cmdline_pre_process at 0x%08X\n", addr);
-            PATCH_CALL(addr, (void *)handle_recovery_boot, TARGET_THUMB);
-        }
-    } else {
-        // Pin androidboot.verifiedbootstate to green.
-        //
-        // With the spoof on, the restored function runs but still dispatches to orange,
-        // because the boot-state byte it reads is not the one the patched getters produce.
-        // A log from the test run shows both values in the same boot:
-        //
-        //     [3463] [AVB20] lock_state = 0x3      LKS_SECURITY_LOCKED, the spoofed value
-        //     [3684] boot state: orange             driven by something else
-        //     dump lock_state, 0x0                  LKS_UNLOCKED, the real value
-        //     androidboot.verifiedbootstate=orange  what the kernel is then told
-        //
-        // verifiedbootstate is what becomes ro.boot.verifiedbootstate, which is what init
-        // and most apps read, so leaving it at orange is the spoof failing where it counts.
-        // The reader behind the orange decision has not been located, so instead of chasing
-        // it the dispatch itself is pinned.
-        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
-        if (addr) {
-            printf("Found cmdline_pre_process at 0x%08X, forcing green state\n", addr);
-            // cmp r3, #3  ->  movs r3, #0
-            PATCH_MEM(addr + CMDLINE_STATE_RANGE, 0x2300);
-        }
+    // Hook handle_recovery_boot() at the entry so a recovery boot can rewrite the two
+    // cmdline template strings from green to orange. Recovery needs adbd and fastbootd
+    // to see an unlocked device, or they refuse to do anything.
+    //
+    // PATCH_CALL writes a 4-byte BL over the callee's first two halfwords. That injects
+    // the call, it does not replace the function: control returns to +0x04 and the rest
+    // of cmdline_pre_process still runs and still appends the state. handle_recovery_boot
+    // edits the templates, not the assembled cmdline, so the append below picks up
+    // whichever string is in the template at that point.
+    //
+    // The hook is therefore installed unconditionally. handle_recovery_boot() returns
+    // immediately unless the bootmode is RECOVERY and the spoof is on, so on a normal
+    // boot this is a call that does nothing. board-fire.c installs it the same way.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
+    if (addr) {
+        printf("Found cmdline_pre_process at 0x%08X\n", addr);
+        PATCH_CALL(addr, (void *)handle_recovery_boot, TARGET_THUMB);
+}
 
-        // Pin the on-screen warning too. cmdline_pre_process only decides what the kernel
-        // is told; the warning text is emitted by its sibling 528 bytes earlier, which
-        // reads the same boot-state global and has the identical cmp/tbb. Without this the
-        // kernel is told "green" while the display still says "orange", which is the
-        // inconsistency the test run showed. Same one-halfword patch, same effect.
-        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_BOOT_STATE_SHOW);
-        if (addr) {
-            printf("Found boot state display at 0x%08X, forcing green state\n", addr);
-            PATCH_MEM(addr + BOOT_STATE_SHOW_RANGE, 0x2300);
-        }
+    // Pin androidboot.verifiedbootstate to green.
+    //
+    // With the spoof on, cmdline_pre_process still runs but dispatches to orange,
+    // because the boot-state byte it reads is not the one the patched getters produce.
+    // A log from the test run shows both values in the same boot:
+    //
+    //     [3463] [AVB20] lock_state = 0x3      LKS_SECURITY_LOCKED, the spoofed value
+    //     [3684] boot state: orange             driven by something else
+    //     dump lock_state, 0x0                  LKS_UNLOCKED, the real value
+    //     androidboot.verifiedbootstate=orange  what the kernel is then told
+    //
+    // verifiedbootstate is what becomes ro.boot.verifiedbootstate, which is what init
+    // and most apps read, so leaving it at orange is the spoof failing where it counts.
+    // The reader behind the orange decision has not been located, so instead of chasing
+    // it the dispatch itself is pinned.
+    //
+    // This is independent of the hook above. PATCH_CALL wrote at +0x00 and +0x02, this
+    // writes at +0x0A, and neither overlaps the other.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
+    if (addr) {
+        printf("Found cmdline_pre_process at 0x%08X, forcing green state\n", addr);
+        // cmp r3, #3  ->  movs r3, #0
+        PATCH_MEM(addr + CMDLINE_STATE_RANGE, 0x2300);
+    }
 
-// Suppress the boot-time unlock warning. This is the one that actually works.
-        //
-        // orange_state_warning() is the dispatcher: it reads the same boot-state global,
-        // and for state 2 (orange) it tail-calls the Orange State screen at 0x4C4545D4,
-        // which prints the warning and adds the 5 second delay:
-        //
-        //     0x4C4546FE  cmp   r3, #2
-        //     0x4C454700  beq   0x4C45471A
-        //     0x4C45471A  pop.w {r3, lr}
-        //     0x4C45471E  b.w   0x4C4545D4     ; Orange State screen + delay
-        //
-        // Forcing it to return 0 skips the state dispatch entirely, so the orange, yellow
-        // and red paths are all bypassed at one point.
-        //
-        // Credit: wulan17, commit 0a7ed94 in his fork, which was confirmed on hardware.
-        // Earlier attempts here pinned the state in the printer and stubbed the screen;
-        // both sit below this dispatcher and only cover part of it.
-        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_ORANGE_STATE_WARNING);
-        if (addr) {
-            printf("Found orange_state_warning at 0x%08X, suppressing warning\n", addr);
-            FORCE_RETURN(addr, 0);
-        }
+    // Pin the on-screen warning too. cmdline_pre_process only decides what the kernel
+    // is told; the warning text is emitted by its sibling 528 bytes earlier, which
+    // reads the same boot-state global and has the identical cmp/tbb. Without this the
+    // kernel is told "green" while the display still says "orange", which is the
+    // inconsistency the test run showed. Same one-halfword patch, same effect.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_BOOT_STATE_SHOW);
+    if (addr) {
+        printf("Found boot state display at 0x%08X, forcing green state\n", addr);
+        PATCH_MEM(addr + BOOT_STATE_SHOW_RANGE, 0x2300);
+    }
+
+    // Suppress the boot-time unlock warning. This is the one that actually works.
+    //
+    // orange_state_warning() is the dispatcher: it reads the same boot-state global,
+    // and for state 2 (orange) it tail-calls the Orange State screen at 0x4C4545D4,
+    // which prints the warning and adds the 5 second delay:
+    //
+    //     0x4C4546FE  cmp   r3, #2
+    //     0x4C454700  beq   0x4C45471A
+    //     0x4C45471A  pop.w {r3, lr}
+    //     0x4C45471E  b.w   0x4C4545D4     ; Orange State screen + delay
+    //
+    // Forcing it to return 0 skips the state dispatch entirely, so the orange, yellow
+    // and red paths are all bypassed at one point.
+    //
+    // Credit: wulan17, commit 0a7ed94 in his fork, which was confirmed on hardware.
+    // Earlier attempts here pinned the state in the printer and stubbed the screen;
+    // both sit below this dispatcher and only cover part of it.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_ORANGE_STATE_WARNING);
+    if (addr) {
+        printf("Found orange_state_warning at 0x%08X, suppressing warning\n", addr);
+        FORCE_RETURN(addr, 0);
     }
 }
 

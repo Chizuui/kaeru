@@ -462,6 +462,51 @@ Credit: `wulan17`, commit [`0a7ed94`](https://github.com/wulan17/kaeru/commit/0a
 in his fork, confirmed on hardware. The screen stub that briefly lived here in `6dd8840`
 has been removed, since it was superseded and never confirmed.
 
+## `cmdline_pre_process` and what `PATCH_CALL` really does
+
+`cmdline_pre_process` is `0x4C454758`. It reads the boot-state global and appends
+`androidboot.verifiedbootstate` once, choosing the string through a `tbb`:
+
+```
+0x4C454762  cmp   r3, #3        ; +0x0A
+0x4C454764  bhi   0x4C454776    ; state > 3 appends nothing
+0x4C454766  tbb   [pc, r3]      ; table 14 02 0E 08
+
+state 0 -> 0x4C454792  verifiedbootstate=green
+state 1 -> 0x4C45476E  verifiedbootstate=yellow
+state 2 -> 0x4C454786  verifiedbootstate=orange
+state 3 -> 0x4C45477A  verifiedbootstate=red
+```
+
+`handle_recovery_boot()` is hooked at its entry so a recovery boot can rewrite the two
+cmdline template strings from green to orange, since recovery needs `adbd` and `fastbootd`
+to see an unlocked device.
+
+An earlier version of this file hooked it only when `get_bootmode() == BOOTMODE_RECOVERY`,
+on the stated grounds that `PATCH_CALL` "replaces the function" and that an unconditional
+hook would therefore leave the kernel with no `verifiedbootstate` token and stall during
+boot. **That reasoning was wrong.** `PATCH_CALL` writes two halfwords, a 4-byte `BL`, at
+`addr`:
+
+```c
+volatile uint16_t* p = (volatile uint16_t*)(addr);
+*p      = hi_inst;
+*(p + 1) = lo_inst;
+```
+
+It injects a call, it does not replace the function. Control returns to `+0x04` and the
+rest of `cmdline_pre_process` still runs and still appends the state.
+`handle_recovery_boot()` edits the template strings, not the assembled cmdline, so the
+append picks up whichever string the template holds at that point.
+
+The hook is now installed unconditionally, the way `board-fire.c` does.
+`handle_recovery_boot()` returns immediately unless the bootmode is `RECOVERY` and the
+spoof is on, so on a normal boot it is a call that does nothing. Dropping the condition
+also removes a dependency on `get_bootmode()` being correct at patch time.
+
+The green pin below is independent of it: `PATCH_CALL` writes at `+0x00` and `+0x02`, the
+pin writes at `+0x0A`, and neither overlaps the other.
+
 ## Accepting any vbmeta signing key
 
 The lock spoof reports the device as locked, and a locked device treats a vbmeta signed
