@@ -59,6 +59,14 @@
 #define SIG_ENV_INIT_PRINTF  0xF03D, 0xF8D5, 0x6823, 0x2000
 // dm-verity corruption warning shown while booting
 #define SIG_DM_VERITY        0xB530, 0xB083, 0xAB02, 0x2200
+// ccci_ld_md_sec_ptr_hdr_verify(): verifies the signature header of the modem firmware
+// images (md1rom, md3rom, ...). Matched by the same signature board-merlin.c and
+// board-ruby.c use; one hit on this image at 0x4C458438.
+//
+// This is a separate path from get_vfy_policy, which sits at 0x4C417B58. This function
+// calls 0x4C417AE0, which is not the one get_vfy_policy resolves to, so forcing
+// get_vfy_policy to 0 does not cover modem images.
+#define SIG_CCCI_MD_VERIFY   0xE92D, 0x41F0, 0x460A, 0x4604
 // load_and_verify_vbmeta(): the AVB public-key check. On this build it sits mid-function
 // at 0x4C464CF8, inside a function whose entry is at 0x4C462708.
 //
@@ -426,6 +434,16 @@ void board_early_init(void) {
     addr = SEARCH_PATTERN(LK_START, LK_END, SIG_GET_DL_POLICY);
     if (addr) {
         printf("Found get_dl_policy at 0x%08X\n", addr);
+        FORCE_RETURN(addr, 0);
+    }
+
+    // Modem firmware images go through their own signature check rather than get_vfy_policy.
+    // Forcing it to return 0 lets a modified md1rom/md3rom load instead of failing the
+    // modem download. Not needed for stock firmware, but this LK exists to boot modified
+    // images, and merlin and ruby both carry the patch.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CCCI_MD_VERIFY);
+    if (addr) {
+        printf("Found ccci_ld_md_sec_ptr_hdr_verify at 0x%08X\n", addr);
         FORCE_RETURN(addr, 0);
     }
 

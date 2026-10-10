@@ -514,6 +514,21 @@ applied here: that offset in this build holds a different comparison, and there 
 deliberate, since a wrong guess at a length check corrupts the parse rather than
 loosening it.
 
+## Modem firmware image verification
+
+Modem images (`md1rom`, `md3rom`) are verified by their own path rather than through
+`get_vfy_policy`. `ccci_ld_md_sec_ptr_hdr_verify` sits at `0x4C458438`, matched by
+`E92D 41F0 460A 4604`, one hit, the same signature `board-merlin.c` and `board-ruby.c`
+use.
+
+It is genuinely a separate path: the function calls `0x4C417AE0`, whereas `get_vfy_policy`
+resolves to `0x4C417B58`. Forcing `get_vfy_policy` to 0 does not reach it, so a modified
+modem image still fails to load without this patch.
+
+The modem currently loads fine on stock firmware and the logs show no verification
+failure, so this is for robustness rather than to fix an observed problem. `merlin` and
+`ruby` both carry it.
+
 ## Letting AVB tolerate verification errors
 
 Once the spoof reports the device as locked, `avb_slot_verify` treats a rejected key, a
