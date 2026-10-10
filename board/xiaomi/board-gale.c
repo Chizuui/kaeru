@@ -39,6 +39,12 @@
 // cmdline_pre_process(): the verifiedbootstate switcher holding
 // "androidboot.verifiedbootstate=orange" and "...=green"
 #define SIG_CMDLINE_PREPROC  0xB508, 0x4B11, 0x447B, 0x681B
+// The sibling that decides which boot state to *display*. Same shape as
+// cmdline_pre_process - same prologue, same global, same cmp/tbb - and it is what prints
+// "boot state: orange" plus the "Orange State / Your device has been unlocked and can't be
+// trusted" screen. The two differ only in the second halfword, 0x4B1C against 0x4B11, so
+// SIG_CMDLINE_PREPROC does not match it.
+#define SIG_BOOT_STATE_SHOW  0xB508, 0x4B1C, 0x447B, 0x681B
 // the printf inside platform_init that reports "ENV init"; runs once the
 // environment is ready, which is the earliest point get_env() returns non-NULL
 #define SIG_ENV_INIT_PRINTF  0xF03D, 0xF8D5, 0x6823, 0x2000
@@ -105,6 +111,10 @@
 // clears C, so the bhi is not taken and tbb reads index 0. One halfword, no shift in the
 // instruction stream.
 #define CMDLINE_STATE_RANGE     0x0A
+
+// Same offset in the boot-state display function, whose prologue is identical. See
+// SIG_BOOT_STATE_SHOW.
+#define BOOT_STATE_SHOW_RANGE   0x0A
 
 // Offset inside avb_add_cmdline_options(), measured from its entry above. This is
 // the CBNZ that picks between the "locked" and "unlocked" strings:
@@ -279,6 +289,17 @@ static void spoof_lock_state(void) {
             printf("Found cmdline_pre_process at 0x%08X, forcing green state\n", addr);
             // cmp r3, #3  ->  movs r3, #0
             PATCH_MEM(addr + CMDLINE_STATE_RANGE, 0x2300);
+        }
+
+        // Pin the on-screen warning too. cmdline_pre_process only decides what the kernel
+        // is told; the warning text is emitted by its sibling 528 bytes earlier, which
+        // reads the same boot-state global and has the identical cmp/tbb. Without this the
+        // kernel is told "green" while the display still says "orange", which is the
+        // inconsistency the test run showed. Same one-halfword patch, same effect.
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_BOOT_STATE_SHOW);
+        if (addr) {
+            printf("Found boot state display at 0x%08X, suppressing warning\n", addr);
+            PATCH_MEM(addr + BOOT_STATE_SHOW_RANGE, 0x2300);
         }
     }
 }
