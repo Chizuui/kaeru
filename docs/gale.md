@@ -514,6 +514,47 @@ applied here: that offset in this build holds a different comparison, and there 
 deliberate, since a wrong guess at a length check corrupts the parse rather than
 loosening it.
 
+## Letting AVB tolerate verification errors
+
+Once the spoof reports the device as locked, `avb_slot_verify` treats a rejected key, a
+hash mismatch or a bad rollback index as fatal, and the boot stops. That shows up in the
+log as:
+
+```
+avb_slot_verify.c : ERROR: vbmeta_a : Public key used to sign data rejected.
+avb_slot_verify.c : ERROR: boot_a   : Hash of data does not match digest in descriptor.
+```
+
+`avb_slot_verify` has a gate that turns those into recoverable errors, the same mode it
+already uses when a device is genuinely unlocked. On `gale` it is at `0x4C465E5A`, matched
+by `F005 0301 F083 0A01 930D 9B70`, one hit:
+
+```
+0x4C465E5A  and   r3, r5, #1     ; r3 = allow_verification_error
+0x4C465E5E  eor   sl, r3, #1
+0x4C465E62  str   r3, [sp, #0x34]
+0x4C465E64  ldr   r3, [sp, #0x1C0]
+0x4C465E66  cmp   r3, #3
+0x4C465E68  ite   ne
+0x4C465E6A  movne r3, #0
+0x4C465E6C  andeq r3, sl, #1
+0x4C465E70  cbz   r3, 0x4C465E7E ; continue; otherwise falls through to
+0x4C465E72  mov.w r0, #8          ; AVB_RESULT_ERROR_VERIFICATION
+```
+
+`PATCH_MEM(addr, 0xF04F, 0x0301)` replaces the `and` with `mov.w r3, #1`. Both halfwords
+are written because the original is a 4-byte Thumb instruction. The `eor` then produces
+`sl = 0`, so the `cbz` is always taken and error 8 is never returned.
+
+This is `board-merlin.c`'s patch, re-derived against this image rather than assumed; the
+signature, the disassembly and the post-patch encoding were all checked here. It was in
+`1547fae` and reverted in `ff57e13` on the assumption that patching
+`load_and_verify_vbmeta` was sufficient. Both are now applied, because they catch
+different failures in different places and neither has been confirmed on this device.
+
+Structurally invalid vbmeta is still rejected; `get_vfy_policy` above is what ungates the
+boot in that case.
+
 ## Not yet implemented
 
 - **`load_and_verify_vbmeta`, third patch.** The key check is now patched; see

@@ -72,6 +72,15 @@
 //     addr + 0x00   7F F4 6B AE   bne.w #0x4C4649D2
 //     addr + 0x72   00 2B         cmp r3, #0        (halfword 0x2B00)
 #define SIG_LOAD_VERIFY_VBMETA  0xF47F, 0xAE6B, 0xE688, 0xF8DD
+// avb_slot_verify(): the gate that decides whether a recoverable verification error is
+// fatal. Taken from board-merlin.c, which runs on Redmi 10X 4G / Redmi Note 9.
+//
+// This was in 1547fae and reverted in ff57e13 on the assumption that patching
+// load_and_verify_vbmeta was enough. Both are now applied, because they catch different
+// failures at different places: this one catches the recoverable errors AVB turns into
+// AVB_RESULT_ERROR_VERIFICATION, load_and_verify_vbmeta catches the public key check.
+// Neither has been confirmed on this device, so having both is the point.
+#define SIG_AVB_ALLOW_ERROR   0xF005, 0x0301, 0xF083, 0x0A01, 0x930D, 0x9B70
 // avb_add_cmdline_options(): the function that assembles
 // androidboot.vbmeta.device_state=... for the kernel cmdline
 #define SIG_AVB_CMDLINE      0xE92D, 0x4FF0, 0x4691, 0xF102
@@ -418,6 +427,33 @@ void board_early_init(void) {
     if (addr) {
         printf("Found get_dl_policy at 0x%08X\n", addr);
         FORCE_RETURN(addr, 0);
+    }
+
+    // Now that the spoof reports "locked", AVB treats a rejected key, a hash mismatch or
+    // a rollback index as fatal and refuses to boot. Force it into the
+    // allow-verification-error mode it already uses for unlocked devices, so recoverable
+    // errors are tolerated and the slot data and kernel cmdline still get built.
+    //
+    // The gate reads allow_verification_error and, when it is clear, returns
+    // AVB_RESULT_ERROR_VERIFICATION:
+    //
+    //     and   r3, r5, #1     ; r3 = allow_verification_error
+    //     eor   sl, r3, #1
+    //     str   r3, [sp, #0x34]
+    //     ldr   r3, [sp, #0x1C0]
+    //     cmp   r3, #3
+    //     ite   ne
+    //     movne r3, #0
+    //     andeq r3, sl, #1
+    //     cbz   r3, <continue>  ; fall through to mov.w r0, #8 otherwise
+    //
+    // Forcing r3 to 1 makes the eor produce sl = 0, so the cbz is always taken and
+    // error 8 is never returned. Both halfwords are written because the original
+    // "and r3, r5, #1" is a 4-byte Thumb instruction.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_AVB_ALLOW_ERROR);
+    if (addr) {
+        printf("Found avb_slot_verify allow-error gate at 0x%08X\n", addr);
+        PATCH_MEM(addr, 0xF04F, 0x0301);  // and r3, r5, #1 -> mov.w r3, #1
     }
 
     // The environment area is not initialized yet when board_early_init runs, so
