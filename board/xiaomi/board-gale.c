@@ -52,9 +52,38 @@
 #define SIG_GET_DL_POLICY    0xB508, 0xF7FF, 0xFF5D, 0xF000
 
 // Offsets inside the fastboot command processor, measured from its entry above.
+//
+// sec_usbdl_enabled() is forced to 0, so "cbz r0" at +0x12E is always taken and the whole
+// block from +0x130 to +0x148 is dead for us. The live path is:
+//
+//     +0x15C  mov  r0, r4
+//     +0x15E  bl   <match command>
+//     +0x162  cmp  r0, #0
+//     +0x164  beq  +0x134
+//     +0x166  ldr  r3, [r7, #0xc]    ; cmd->allowed_when_security_on
+//     +0x168  cmp  r3, #0
+//     +0x16A  bne  +0x134             ; set -> carry on to the handler
+//     +0x16C  ldr  r0, ="not support on security"
+//     +0x170  bl   fastboot_fail
+//     +0x176  b    <loop continue>
+//
+// The refusal is skipped by branching to the loop-continue label, not by the failure call,
+// so NOPing +0x170 only silences the message: execution still falls through to "b
+// <loop continue>" and the command never runs. LK's built-in flash and erase entries carry
+// allowed_when_security_on = 0 in LK's own command table, which kaeru cannot edit, so the
+// branch has to be forced instead.
+//
+// PATCH_CALL/PATCH_ALL_BL cannot help here either: they rewrite call sites, and this is a
+// table field read inside the dispatcher.
+//
+// 0xD1E3 is a 16-bit B<cond> T1 with an 8-bit signed offset (-0x3A), not the 32-bit imm11
+// form, so flipping the condition field in place is not possible. The unconditional B T2 is
+// 11100 imm11; imm11 = -0x3A/2 = 0x7E3, giving 0xE7E3, which capstone confirms decodes to
+// "b #0x4C42B962" - the same target as the BNE it replaces.
 #define FB_FAIL_NOT_SUPPORTED   0x170   // BL fastboot_fail, "not support on security"
 #define FB_FAIL_NOT_ALLOWED     0x17C   // BL fastboot_fail, "not allowed in locked state"
 #define FB_SECURITY_GATE        0x12A   // BL sec_usbdl_enabled, branches into the handler
+#define FB_ALLOWED_GATE_BRANCH  0x16A   // BNE +0x134 -> B +0x134
 
 // Offset inside cmdline_pre_process(), measured from its entry above. The function reads a
 // boot-state byte, checks it is in range, then dispatches with tbb:
@@ -144,6 +173,12 @@ static void spoof_lock_state(void) {
         // +0x12A and the dispatch at +0x15C, so the branch must cover 0x15C - 0x12A
         // - 4 = 0x2E bytes, giving imm11 = 0x17 and the encoding 0xE017.
         PATCH_MEM(addr + FB_SECURITY_GATE, 0xE017);
+
+        // Force the allowed_when_security_on branch. Without this, fastboot flash works
+        // with the spoof off and silently does nothing with it on: the dispatcher skips
+        // LK's own flash/erase entries because their table flag is 0, and the NOPs above
+        // only removed the message. See the comment on FB_ALLOWED_GATE_BRANCH.
+        PATCH_MEM(addr + FB_ALLOWED_GATE_BRANCH, 0xE7E3);
     }
 
     int spoofing = is_spoofing_enabled();
