@@ -243,6 +243,7 @@ static void spoof_lock_state(void) {
 
     int spoofing = is_spoofing_enabled();
     fastboot_publish("is-spoofing", spoofing ? "1" : "0");
+    spoof_publish_mask();
 
     if (!spoofing) {
         printf("Bootloader lock status spoofing disabled.\n");
@@ -292,33 +293,37 @@ static void spoof_lock_state(void) {
     // use -0x320, which on this image lands on 0x4C4649D8 = "lsrs", not a comparison
     // at all. board-fire.c uses -0x32C, and that lands on 0x4C4649CC = "cmp r2, r3",
     // which is the chained-key length check. See docs/gale.md.
-    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_LOAD_VERIFY_VBMETA);
-    if (addr) {
-        printf("Found load_and_verify_vbmeta at 0x%08X\n", addr);
+    if (spoof_group_enabled(SPOOF_MASK_VBMETA_KEY)) {
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_LOAD_VERIFY_VBMETA);
+        if (addr) {
+            printf("Found load_and_verify_vbmeta at 0x%08X\n", addr);
 
-        // The chained-key path compares key lengths before it calls memcmp, and on a
-        // mismatch skips straight to the error. Rewriting "cmp r2, r3" as
-        // "cmp r3, r3" makes the length check always succeed, so the memcmp path is
-        // reached and the NOP below decides the outcome.
-        PATCH_MEM(addr + VBMETA_CHAIN_KEY_LEN, 0x451B);  // cmp r2, r3 -> cmp r3, r3
+            // The chained-key path compares key lengths before it calls memcmp, and on a
+            // mismatch skips straight to the error. Rewriting "cmp r2, r3" as
+            // "cmp r3, r3" makes the length check always succeed, so the memcmp path is
+            // reached and the NOP below decides the outcome.
+            PATCH_MEM(addr + VBMETA_CHAIN_KEY_LEN, 0x451B);  // cmp r2, r3 -> cmp r3, r3
 
-        // NOP the bne.w at +0x00 (2 halfwords = the full 4-byte instruction), so the
-        // following unconditional branch is always taken.
-        NOP(addr, 2);
+            // NOP the bne.w at +0x00 (2 halfwords = the full 4-byte instruction), so the
+            // following unconditional branch is always taken.
+            NOP(addr, 2);
 
-        // cmp r3, #0 -> movs r3, #1, so key_is_trusted is always non-zero and the branch
-        // after it takes the accepted path.
-        PATCH_MEM(addr + VBMETA_KEY_TRUSTED, 0x2301);
+            // cmp r3, #0 -> movs r3, #1, so key_is_trusted is always non-zero and the branch
+            // after it takes the accepted path.
+            PATCH_MEM(addr + VBMETA_KEY_TRUSTED, 0x2301);
+        }
     }
 
     // libavb appends androidboot.vbmeta.device_state to the kernel cmdline, and it
     // keeps reporting "unlocked" because the state it reads is the real one, not the
     // spoofed one the lock shim hands out. Forcing the "locked" string keeps the
     // cmdline consistent with the lock state everything else observes.
-    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_AVB_CMDLINE);
-    if (addr) {
-        printf("Found AVB cmdline function at 0x%08X\n", addr);
-        NOP(addr + AVB_DEVICE_STATE_SEL, 1);
+    if (spoof_group_enabled(SPOOF_MASK_AVB_CMDLINE)) {
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_AVB_CMDLINE);
+        if (addr) {
+            printf("Found AVB cmdline function at 0x%08X\n", addr);
+            NOP(addr + AVB_DEVICE_STATE_SEL, 1);
+        }
     }
 
     // cmdline_pre_process runs just before the cmdline is handed to the kernel. It is
@@ -348,11 +353,13 @@ static void spoof_lock_state(void) {
     // The hook is therefore installed unconditionally. handle_recovery_boot() returns
     // immediately unless the bootmode is RECOVERY and the spoof is on, so on a normal
     // boot this is a call that does nothing. board-fire.c installs it the same way.
-    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
-    if (addr) {
-        printf("Found cmdline_pre_process at 0x%08X\n", addr);
-        PATCH_CALL(addr, (void *)handle_recovery_boot, TARGET_THUMB);
-}
+    if (spoof_group_enabled(SPOOF_MASK_CMDLINE_HOOK)) {
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
+        if (addr) {
+            printf("Found cmdline_pre_process at 0x%08X\n", addr);
+            PATCH_CALL(addr, (void *)handle_recovery_boot, TARGET_THUMB);
+        }
+    }
 
     // Pin androidboot.verifiedbootstate to green.
     //
@@ -372,11 +379,13 @@ static void spoof_lock_state(void) {
     //
     // This is independent of the hook above. PATCH_CALL wrote at +0x00 and +0x02, this
     // writes at +0x0A, and neither overlaps the other.
-    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
-    if (addr) {
-        printf("Found cmdline_pre_process at 0x%08X, forcing green state\n", addr);
-        // cmp r3, #3  ->  movs r3, #0
-        PATCH_MEM(addr + CMDLINE_STATE_RANGE, 0x2300);
+    if (spoof_group_enabled(SPOOF_MASK_CMDLINE_GREEN)) {
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
+        if (addr) {
+            printf("Found cmdline_pre_process at 0x%08X, forcing green state\n", addr);
+            // cmp r3, #3  ->  movs r3, #0
+            PATCH_MEM(addr + CMDLINE_STATE_RANGE, 0x2300);
+        }
     }
 
     // Pin the on-screen warning too. cmdline_pre_process only decides what the kernel
@@ -384,10 +393,12 @@ static void spoof_lock_state(void) {
     // reads the same boot-state global and has the identical cmp/tbb. Without this the
     // kernel is told "green" while the display still says "orange", which is the
     // inconsistency the test run showed. Same one-halfword patch, same effect.
-    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_BOOT_STATE_SHOW);
-    if (addr) {
-        printf("Found boot state display at 0x%08X, forcing green state\n", addr);
-        PATCH_MEM(addr + BOOT_STATE_SHOW_RANGE, 0x2300);
+    if (spoof_group_enabled(SPOOF_MASK_STATE_SHOW)) {
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_BOOT_STATE_SHOW);
+        if (addr) {
+            printf("Found boot state display at 0x%08X, forcing green state\n", addr);
+            PATCH_MEM(addr + BOOT_STATE_SHOW_RANGE, 0x2300);
+        }
     }
 
     // Suppress the boot-time unlock warning. This is the one that actually works.
@@ -407,10 +418,12 @@ static void spoof_lock_state(void) {
     // Credit: wulan17, commit 0a7ed94 in his fork, which was confirmed on hardware.
     // Earlier attempts here pinned the state in the printer and stubbed the screen;
     // both sit below this dispatcher and only cover part of it.
-    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_ORANGE_STATE_WARNING);
-    if (addr) {
-        printf("Found orange_state_warning at 0x%08X, suppressing warning\n", addr);
-        FORCE_RETURN(addr, 0);
+    if (spoof_group_enabled(SPOOF_MASK_ORANGE_SCREEN)) {
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_ORANGE_STATE_WARNING);
+        if (addr) {
+            printf("Found orange_state_warning at 0x%08X, suppressing warning\n", addr);
+            FORCE_RETURN(addr, 0);
+        }
     }
 }
 
@@ -430,6 +443,7 @@ static void spoof_lock_state(void) {
 // (ldr r3, [r7, #0x10] = forbidden_when_lock_on) reachable, since that one is only
 // evaluated once allowed_when_security_on passes.
 FASTBOOT_CMD(bldr_spoof, "oem bldr_spoof", cmd_spoof_bootloader_lock, 1);
+FASTBOOT_CMD(bldr_spoof_mask, "oem bldr_spoof_mask", cmd_spoof_patch_mask, 1);
 
 void board_early_init(void) {
     printf("Entering early init for Redmi 13C (gale)\n");
