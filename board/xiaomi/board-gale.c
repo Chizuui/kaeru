@@ -18,6 +18,7 @@
 // explicitly un-spoofed here.
 
 #include <board_ops.h>
+#include <lib/bootmode.h>
 
 // ── LK signatures, verified unique in gale's lk.img ────────────────────────────
 //
@@ -167,15 +168,33 @@ static void spoof_lock_state(void) {
         NOP(addr + AVB_DEVICE_STATE_SEL, 1);
     }
 
-    // cmdline_pre_process runs just before the cmdline is handed to the kernel.
-    // Hooking it lets handle_recovery_boot() flip verifiedbootstate back to
-    // "orange" when booting recovery, so adbd and fastbootd still work there even
-    // though the lock state is spoofed as locked. Recovery is deliberately the one
-    // path that is not spoofed.
-    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
-    if (addr) {
-        printf("Found cmdline_pre_process at 0x%08X\n", addr);
-        PATCH_CALL(addr, (void *)handle_recovery_boot, TARGET_THUMB);
+    // cmdline_pre_process runs just before the cmdline is handed to the kernel. It is
+    // the function that appends androidboot.verifiedbootstate: it switches on the boot
+    // state and calls append_option() once, with "green", "yellow", "orange" or "red".
+    //
+    // PATCH_CALL overwrites the callee's first two halfwords, so hooking it this way does
+    // not add a call, it *replaces* the function. Because handle_recovery_boot() returns
+    // immediately unless the bootmode is RECOVERY, that replacement means a normal boot
+    // never runs this code at all, and the kernel is handed a cmdline with no
+    // androidboot.verifiedbootstate token whatsoever.
+    //
+    // That is not acceptable here. With the spoof on, this cmdline also carries
+    // androidboot.vbmeta.device_state=locked, androidboot.secureboot=1 and
+    // androidboot.veritymode.managed=yes. Verifiedbootstate is what tells init which of
+    // those it is allowed to trust, so dropping it leaves the kernel unable to reconcile
+    // them and it stalls during boot, before printing its first line.
+    //
+    // cmdline_pre_process is reached through a function pointer, not a BL, so redirecting
+    // the caller is not available and a chain would need a trampoline. Instead only hook
+    // it when recovery is actually being booted: handle_recovery_boot() does nothing
+    // except during recovery anyway, so this keeps its one useful behaviour while leaving
+    // every other boot with LK's own verifiedbootstate handling intact.
+    if (get_bootmode() == BOOTMODE_RECOVERY) {
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_CMDLINE_PREPROC);
+        if (addr) {
+            printf("Found cmdline_pre_process at 0x%08X\n", addr);
+            PATCH_CALL(addr, (void *)handle_recovery_boot, TARGET_THUMB);
+        }
     }
 }
 
