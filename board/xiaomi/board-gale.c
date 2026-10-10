@@ -45,6 +45,15 @@
 // trusted" screen. The two differ only in the second halfword, 0x4B1C against 0x4B11, so
 // SIG_CMDLINE_PREPROC does not match it.
 #define SIG_BOOT_STATE_SHOW  0xB508, 0x4B1C, 0x447B, 0x681B
+// The function that actually draws the Orange State screen. It sits 0x8C bytes past the
+// printer above, prints two strings (0x4C4545EE "Orange State", 0x4C4545F6 "Your device has
+// been unlocked and can't be trusted"), drives the display, and returns 0.
+//
+// It has no BL caller anywhere in the payload, so the caller cannot be redirected. It is
+// stubbed instead. Pinning the printer's state does not help: every one of its arms,
+// including the orange one, ends at 0x4C454564 which is "movs r0, #0 / pop {r3, pc}", so it
+// always returns 0 and the warning is not gated on its result at all.
+#define SIG_ORANGE_SCREEN   0xB508, 0xF7EC, 0xF97F, 0xF7B1, 0xF89F
 // the printf inside platform_init that reports "ENV init"; runs once the
 // environment is ready, which is the earliest point get_env() returns non-NULL
 #define SIG_ENV_INIT_PRINTF  0xF03D, 0xF8D5, 0x6823, 0x2000
@@ -115,6 +124,11 @@
 // Same offset in the boot-state display function, whose prologue is identical. See
 // SIG_BOOT_STATE_SHOW.
 #define BOOT_STATE_SHOW_RANGE   0x0A
+
+// Stub for the Orange State screen function: movs r0, #0 / bx lr, over its first two
+// halfwords (push {r3, lr} plus the first half of a bl). It already returned 0, so the
+// calling convention is unchanged; only the warning itself is skipped.
+#define ORANGE_SCREEN_STUB     0x2000, 0x4770
 
 // Offset inside avb_add_cmdline_options(), measured from its entry above. This is
 // the CBNZ that picks between the "locked" and "unlocked" strings:
@@ -298,8 +312,27 @@ static void spoof_lock_state(void) {
         // inconsistency the test run showed. Same one-halfword patch, same effect.
         addr = SEARCH_PATTERN(LK_START, LK_END, SIG_BOOT_STATE_SHOW);
         if (addr) {
-            printf("Found boot state display at 0x%08X, suppressing warning\n", addr);
+            printf("Found boot state display at 0x%08X, forcing green state\n", addr);
             PATCH_MEM(addr + BOOT_STATE_SHOW_RANGE, 0x2300);
+        }
+
+        // Stub the screen itself. This is what removes the lock warning.
+        //
+        // The state pin above only renames the log line. Every arm of the printer,
+        // including the orange one, ends at 0x4C454564 = "movs r0, #0 / pop {r3, pc}", so
+        // the function returns 0 whichever state it prints, and its caller at 0x4C46831C
+        // takes "cbz r0" unconditionally. The 0x10007000 boot-state code that caller
+        // carries is therefore dead on this path, and the warning is raised from the
+        // display code instead - the log shows mt_disp_show_boot_logo reporting
+        // g_boot_state=2 immediately after the "boot state: orange" line.
+        //
+        // Replacing the entry with "movs r0, #0 / bx lr" skips drawing and printing while
+        // returning the same 0 the real function returns, so nothing downstream changes
+        // except that the warning never gets shown.
+        addr = SEARCH_PATTERN(LK_START, LK_END, SIG_ORANGE_SCREEN);
+        if (addr) {
+            printf("Found Orange State screen at 0x%08X, stubbing it\n", addr);
+            PATCH_MEM(addr, ORANGE_SCREEN_STUB);
         }
     }
 }
