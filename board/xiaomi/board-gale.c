@@ -121,6 +121,31 @@ static void spoof_lock_state(void) {
         FORCE_RETURN(addr, 0);
     }
 
+    // fastboot must not be affected by the spoof, so drop both refusal messages and
+    // branch straight into the command handler. Without this, spoofing the lock
+    // state to "locked" makes fastboot reject commands with "not support on
+    // security" and "not allowed in locked state" even though the device is really
+    // unlocked underneath.
+    //
+    // Applied unconditionally, like sec_usbdl_enabled and dm_verity_corruption above.
+    // It used to sit after the "spoofing disabled" early return, which meant that with
+    // the spoof off these gates were left intact, so on a device whose real state is
+    // locked fastboot refused to flash. That is backwards: the gates exist to stop the
+    // spoof from locking fastboot out, and with the spoof off there is nothing to stop.
+    // Access to fastboot should never depend on the spoof flag.
+    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_FB_PROCESSOR);
+    if (addr) {
+        printf("Found fastboot command processor at 0x%08X\n", addr);
+
+        NOP(addr + FB_FAIL_NOT_SUPPORTED, 2);
+        NOP(addr + FB_FAIL_NOT_ALLOWED, 2);
+
+        // Branch straight into the dispatch that follows the gate. The gate sits at
+        // +0x12A and the dispatch at +0x15C, so the branch must cover 0x15C - 0x12A
+        // - 4 = 0x2E bytes, giving imm11 = 0x17 and the encoding 0xE017.
+        PATCH_MEM(addr + FB_SECURITY_GATE, 0xE017);
+    }
+
     int spoofing = is_spoofing_enabled();
     fastboot_publish("is-spoofing", spoofing ? "1" : "0");
 
@@ -159,24 +184,6 @@ static void spoof_lock_state(void) {
     if (adapter_b && custom_get_lock) {
         int n = PATCH_ALL_BL(adapter_b, ADAPTER_B_SIZE, custom_get_lock, get_lock_state);
         printf("Patched %d custom_get_lock_state call(s) in adapter B\n", n);
-    }
-
-    // fastboot must not be affected by the spoof, so drop both refusal messages and
-    // branch straight into the command handler. Without this, spoofing the lock
-    // state to "locked" makes fastboot reject commands with "not support on
-    // security" and "not allowed in locked state" even though the device is really
-    // unlocked underneath.
-    addr = SEARCH_PATTERN(LK_START, LK_END, SIG_FB_PROCESSOR);
-    if (addr) {
-        printf("Found fastboot command processor at 0x%08X\n", addr);
-
-        NOP(addr + FB_FAIL_NOT_SUPPORTED, 2);
-        NOP(addr + FB_FAIL_NOT_ALLOWED, 2);
-
-        // Branch straight into the dispatch that follows the gate. The gate sits at
-        // +0x12A and the dispatch at +0x15C, so the branch must cover 0x15C - 0x12A
-        // - 4 = 0x2E bytes, giving imm11 = 0x17 and the encoding 0xE017.
-        PATCH_MEM(addr + FB_SECURITY_GATE, 0xE017);
     }
 
     // libavb appends androidboot.vbmeta.device_state to the kernel cmdline, and it
