@@ -93,9 +93,20 @@ static void spoof_lock_state(void) {
     if (addr) {
         printf("Found AVB cmdline function at 0x%08X\n", addr);
 
-        // NOP out the code that checks the actual device state,
-        // forcing libavb to always use the "locked" string.
-        NOP(addr + 0xA2, 4);
+        // The CBNZ at +0xA2 is what picks between the "locked" and "unlocked" strings:
+        //
+        //     +0xA0  ldr  r3, [sp, #0x24]    ; the device state libavb just fetched
+        //     +0xA2  cbnz r3, +0x52          ; non-zero -> "unlocked"
+        //     +0xA4  ldr  r2, [pc, #0x244]   ; "locked"
+        //     +0xA6  add  r2, pc
+        //     +0xA8  ldr  r1, [pc, #0x244]   ; "androidboot.vbmeta.device_state"
+        //     +0xAE  bl   append_option
+        //
+        // NOPing the CBNZ forces the fallthrough, so the "locked" string is always used.
+        // Exactly one halfword: the two literal loads right after it are what supply that
+        // string and its key, so a wider NOP would leave append_option reading whatever r1
+        // and r2 happened to hold.
+        NOP(addr + 0xA2, 1);
     }
 
     // cmdline_pre_process runs just before the cmdline is handed to the kernel. It is the
