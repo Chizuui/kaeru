@@ -115,11 +115,11 @@ CONFIG_GET_ENV_ADDRESS=0x4C45C4E8
 # set_env prints "[%s]set_env %s %s\n" and "invalid parameter in set_env_with_area".
 CONFIG_SET_ENV_ADDRESS=0x4C45C51E
 
-# Cmdline templates rewritten by handle_recovery_boot() when booting recovery, so
-# adbd/fastbootd still see "orange" while the lock state is spoofed as locked.
-# Both live in the verifiedbootstate switcher at 0x4C454758.
-CONFIG_RECOVERY_CMDLINE1_ADDRESS=0x4C516380
-CONFIG_RECOVERY_CMDLINE2_ADDRESS=0x4C5163F4
+# Recovery is given "orange" by repointing the state-0 literal inside cmdline_pre_process
+# from board-gale.c, so the generic RECOVERY_CMDLINE mechanism is unused here. It would also
+# have been wrong: on this image the four verifiedbootstate strings are adjacent entries of a
+# single 40-byte table, and green -> orange is one byte longer, which spills over the
+# "Your device has wrong setting" string that immediately follows. See docs/gale.md.
 
 # `fastboot oem bldr_spoof on|off` persists its flag through LK's environment, so
 # ENVIRONMENT_SUPPORT is what makes the toggle survive a reboot. Without it get_env()
@@ -200,7 +200,6 @@ CONFIG_MT_PART_GET_DEVICE_ADDRESS=0x4C4696B8
 CONFIG_MEDIATEK_MT6768=y
 CONFIG_XIAOMI_GALE=y
 CONFIG_SPOOF_SUPPORT=y
-CONFIG_RECOVERY_CMDLINE_PATCH=y
 CONFIG_CERT_BYPASS=y
 
 # ── NOT SET BY utils/parse.py ───────────────────────────────────────────────────

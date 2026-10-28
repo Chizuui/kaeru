@@ -139,8 +139,6 @@ board. "Exact" means the address coincides with an IDA function start.
 | `DPRINTF` | `0x4C440CE4` | exact |
 | `GET_ENV` | `0x4C45C4E8` | prints `"[%s]get_env %s from area %d\n"` |
 | `SET_ENV` | `0x4C45C51E` | prints `"[%s]set_env %s %s\n"` |
-| `RECOVERY_CMDLINE1` | `0x4C516380` | `"…verifiedbootstate=orange"` |
-| `RECOVERY_CMDLINE2` | `0x4C5163F4` | `"…verifiedbootstate=green"` |
 | `PLATFORM_INIT_CALLER` | `0x4C425E0C` | the `bl platform_init` in `bootstrap2`; hand-derived, see below |
 
 ### Why `app()` is not found by the usual method
@@ -230,18 +228,85 @@ Measured from the entry at `0x4C42B82E`:
 These are **not** the offsets `earth` uses (`+0x19A`, `+0x22A`, `+0x23E`, `+0x24A`);
 they were re-derived from this image.
 
+## `PATCH_CALL` cannot hook `cmdline_pre_process` on this image
+
+`board-fire.c`, `board-earth.c`, `board-merlin.c` and most other boards hook this function
+with:
+
+```c
+PATCH_CALL(addr, (void *)handle_recovery_boot, TARGET_THUMB);
+```
+
+`PATCH_CALL` writes `hi_inst` at `addr` and `lo_inst` at `addr + 2` — two halfwords, a 4-byte
+`BL`. It is safe on those boards because their `cmdline_pre_process` begins with a 32-bit
+`BL` of its own (`F017 FB5E F001 F920` on `fire`), so the replacement consumes exactly one
+instruction that was already there for its own purposes.
+
+Here it begins with two separate 16-bit instructions, and both are needed:
+
+```
+0x4C454758  B508   push {r3, lr}
+0x4C45475A  4B11   ldr  r3, [pc, #0x44]     ; literal at +0x48 = 0x0011EE28
+0x4C45475C  447B   add  r3, pc              ; pc = 0x4C454760 -> r3 = 0x4C573588
+0x4C45475E  681B   ldr  r3, [r3]
+0x4C454760  681B   ldr  r3, [r3]            ; r3 = boot-state byte
+0x4C454762  2B03   cmp  r3, #3              ; +0x0A, the pin site
+0x4C454764  D807   bhi  0x4C454776
+0x4C454766  E8DF F003  tbb [pc, r3]
+```
+
+A `BL` at `+0x00` overwrites `push` and `ldr` together, with three consequences:
+
+- the pointer load is gone, so `add r3, pc` adds PC to whatever the callee left in
+  caller-saved `r3`, and the two `ldr r3, [r3]` then dereference it — a data abort;
+- the only save of `lr` is gone, but `pop {r3, pc}` at `+0x20` still pops a pair, so it
+  returns to whatever is on the stack;
+- the frame is unbalanced, since the `push` that matched that `pop` never runs.
+
+That is what made commit `84c60ff` (the unconditional hook) hang on every boot, right after
+the `Jumping to kaeru stage 2` banner. Guarding it to recovery only, as `72c0c9a` did, moves
+the hang into recovery instead of fixing it.
+
+The pin at `+0x0A` is unaffected: it writes a single halfword at an offset the hook never
+touches, which is why a normal boot still reached the kernel with the guard in place.
+
+Recovery on this board therefore uses the literal repoint described below and does not call
+`handle_recovery_boot()` at all.
+
 ## Recovery and fastboot are deliberately not spoofed
 
 The lock state is forced to `"locked"` so the TEE, attestation and Play Integrity see
 a locked device. That would normally break two things, and both are handled
 explicitly:
 
-- **Recovery.** `cmdline_pre_process()` (`0x4C454758`) is hooked to
-  `handle_recovery_boot()` from `lib/recovery.c`. When the boot mode is
-  `BOOTMODE_RECOVERY` and spoofing is on, it rewrites `androidboot.verifiedbootstate`
-  from `green` back to `orange` in both cmdline templates, so `adbd` and `fastbootd`
-  still function. `vbmeta.device_state` is deliberately left alone — rewriting it to
-  `unlocked` hangs recovery on some devices.
+- **Recovery.** `cmdline_pre_process()` (`0x4C454758`) is pinned to state 0 like every other
+  boot, and then the state-0 literal is repointed from the green string to the orange one, so
+  `adbd` and `fastbootd` still see an unlocked device. `vbmeta.device_state` is deliberately
+  left alone — rewriting it to `unlocked` hangs recovery on some devices.
+
+  The generic `CONFIG_RECOVERY_CMDLINE` mechanism is not used here. It calls
+  `cmdline_replace()` on two string addresses, and on this image both of the addresses that
+  were recorded pointed into *one* table:
+
+  ```
+  0x4C516380  "androidboot.verifiedbootstate=orange"   <- was CONFIG_RECOVERY_CMDLINE1
+  0x4C5163A8  "androidboot.verifiedbootstate=yellow"
+  0x4C5163D0  "androidboot.verifiedbootstate=red"
+  0x4C5163F4  "androidboot.verifiedbootstate=green"    <- was CONFIG_RECOVERY_CMDLINE2
+  0x4C516418  "Your device has wrong setting and may not ..."
+  ```
+
+  Only four `verifiedbootstate` strings exist in the whole image, and there is no second
+  copy. Every other board's defconfig has `CMDLINE2 - CMDLINE1 == 0x804` (`CMDLINE_LEN` plus
+  4); here the gap was `0x74`, because `CMDLINE1` had been filled in with the *orange* entry.
+  Patching it was a no-op — `strncmp("orange", "green", 5)` fails and `cmdline_replace()`
+  returns false without writing.
+
+  `CMDLINE2` did match, but the rewrite overruns. green is the last entry of the table and is
+  followed immediately by the `"Your device has wrong setting"` string, and green -> orange is
+  one byte longer, so `memmove()` shifts the terminator onto that string's first byte. The
+  replacement used here instead rewrites the state-0 entry of the function's own literal pool,
+  which touches no string at all.
 - **Fastboot.** The two refusal messages and the security gate are removed, so
   fastboot commands keep working even though the spoofed state reads `locked`. The
   `oem bldr_spoof` command itself is registered with `allowed_when_security_on = 1`;
