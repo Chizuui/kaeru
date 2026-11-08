@@ -142,7 +142,7 @@ static void spoof_lock_state(void) {
 }
 
 // kaeru bootloader lock spoofing control command.
-FASTBOOT_CMD(bldr_spoof, "oem bldr_spoof", cmd_spoof_bootloader_lock, 0);
+FASTBOOT_CMD(bldr_spoof, "oem bldr_spoof", cmd_spoof_bootloader_lock, 1);
 
 void board_early_init(void) {
     printf("Entering early init for Redmi 13C (gale)\n");
