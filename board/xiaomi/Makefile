@@ -10,3 +10,4 @@ lib-$(CONFIG_XIAOMI_BEGONIA) += xiaomi/board-begonia.o
 lib-$(CONFIG_XIAOMI_PISSARRO) += xiaomi/board-pissarro.o
 lib-$(CONFIG_XIAOMI_LIGHT) += xiaomi/board-light.o
 lib-$(CONFIG_XIAOMI_GALE) += xiaomi/board-gale.o
+lib-$(CONFIG_XIAOMI_GALE_HOS1) += xiaomi/board-gale-hos1.o

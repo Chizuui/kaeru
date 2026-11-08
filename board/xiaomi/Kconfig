@@ -69,3 +69,10 @@ config XIAOMI_GALE
     default n
     help
       Say Y if you want to include support for Redmi 13C
+
+config XIAOMI_GALE_HOS1
+    bool "Support Redmi 13C (MIUI 14 / HyperOS 1 LK)"
+    depends on !XIAOMI_GALE
+    default n
+    help
+      Say Y to build for the Redmi 13C MIUI 14 / HyperOS 1 bootloader image.
