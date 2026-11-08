@@ -10,6 +10,39 @@
 
 static uint32_t lock_state_veneer;
 
+static void patch_hos1_recovery_cmdline(void) {
+    bootmode_t mode = get_bootmode();
+    if (!is_spoofing_enabled())
+        return;
+
+    // MediaTek/Xiaomi LK variants do not all report fastbootd the same way.
+    // Keep ordinary Android (BOOTMODE_NORMAL) untouched, but allow recovery,
+    // eRecovery, and fastboot boot modes to advertise orange to fastbootd.
+    if (mode != BOOTMODE_RECOVERY && mode != BOOTMODE_ERECOVERY &&
+        mode != BOOTMODE_FASTBOOT) {
+        printf("MIUI recovery cmdline patch skipped for LK bootmode %d.\n", mode);
+        return;
+    }
+
+    static const uint32_t cmdline_addrs[] = {
+        CONFIG_RECOVERY_CMDLINE1_ADDRESS,
+        CONFIG_RECOVERY_CMDLINE2_ADDRESS,
+    };
+
+    printf("MIUI LK bootmode %d: patching recovery cmdline templates.\n", mode);
+    for (unsigned i = 0; i < ARRAY_SIZE(cmdline_addrs); i++) {
+        uint32_t addr = cmdline_addrs[i];
+        if (!addr)
+            continue;
+
+        bool patched = cmdline_replace((char *)addr,
+                                       "androidboot.verifiedbootstate=",
+                                       "green", "orange");
+        printf("MIUI cmdline template 0x%08X: %s\n", addr,
+               patched ? "green -> orange" : "no green value found");
+    }
+}
+
 // Keep Android's normal boot reported as locked, but expose the real unlocked
 // state to LK fastboot so bootloader-fastboot can authorize flash operations.
 // Recovery fastbootd gets its unlocked signal from verifiedbootstate=orange in
@@ -90,10 +123,7 @@ static void spoof_lock_state(void) {
     // fastbootd runs from the recovery ramdisk and checks verifiedbootstate.
     // Only rewrite the recovery cmdline templates; leave vbmeta.device_state
     // locked because changing it can hang recovery on some devices.
-    if (get_bootmode() == BOOTMODE_RECOVERY) {
-        printf("Recovery boot detected; making fastbootd see verifiedbootstate=orange.\n");
-        handle_recovery_boot();
-    }
+    patch_hos1_recovery_cmdline();
 
     // The boot-state display uses a sibling function; pin it to green as well.
     addr = SEARCH_PATTERN(LK_START, LK_END, 0xB508, 0x4B1C, 0x447B, 0x681B);
