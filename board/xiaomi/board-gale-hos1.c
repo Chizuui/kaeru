@@ -123,8 +123,6 @@ static void spoof_lock_state(void) {
     // fastbootd runs from the recovery ramdisk and checks verifiedbootstate.
     // Only rewrite the recovery cmdline templates; leave vbmeta.device_state
     // locked because changing it can hang recovery on some devices.
-    patch_hos1_recovery_cmdline();
-
     // The boot-state display uses a sibling function; pin it to green as well.
     addr = SEARCH_PATTERN(LK_START, LK_END, 0xB508, 0x4B1C, 0x447B, 0x681B);
     if (addr) {
@@ -206,6 +204,10 @@ void board_early_init(void) {
 
 void board_late_init(void) {
     printf("Entering late init for Redmi 13C (gale, MIUI 14 / HyperOS 1)\n");
+    // Bootmode may be finalized after platform/environment initialization.
+    // Run the recovery cmdline patch here so it sees the final LK boot mode.
+    patch_hos1_recovery_cmdline();
+
     uint32_t addr = SEARCH_PATTERN(LK_START, LK_END, 0xB530, 0xB083, 0xAB02, 0x2200);
     if (addr) {
         printf("Found MIUI dm_verity corruption warning at 0x%08X\n", addr);
