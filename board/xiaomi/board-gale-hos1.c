@@ -123,7 +123,7 @@ static void spoof_lock_state(void) {
     }
 }
 
-FASTBOOT_CMD(bldr_spoof, "oem bldr_spoof", cmd_spoof_bootloader_lock, 0);
+FASTBOOT_CMD(bldr_spoof, "oem bldr_spoof", cmd_spoof_bootloader_lock, 1);
 
 void board_early_init(void) {
     printf("Entering early init for Redmi 13C (gale, MIUI 14 / HyperOS 1)\n");
