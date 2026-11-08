@@ -48,7 +48,9 @@ static void patch_hos1_recovery_cmdline(void) {
 // Recovery fastbootd gets its unlocked signal from verifiedbootstate=orange in
 // the recovery cmdline, handled separately below.
 static int get_lock_state_for_bootmode(uint32_t *lock_state) {
-    if (!is_spoofing_enabled() || get_bootmode() == BOOTMODE_FASTBOOT) {
+    bootmode_t mode = get_bootmode();
+    if (!is_spoofing_enabled() || mode == BOOTMODE_FASTBOOT ||
+        mode == BOOTMODE_RECOVERY || mode == BOOTMODE_ERECOVERY) {
         *lock_state = LKS_UNLOCK;
         return 0;
     }
@@ -101,14 +103,6 @@ static void spoof_lock_state(void) {
         PATCH_MEM(addr + 0x16A, 0xE7E3);
         NOP(addr + 0x170, 2);
         NOP(addr + 0x17C, 2);
-    }
-
-    // Force the device_state option to use the locked string. Only the CBNZ is
-    // replaced; the literal loads immediately following it must remain intact.
-    addr = SEARCH_PATTERN(LK_START, LK_END, 0xE92D, 0x4FF0, 0x4691, 0xF102);
-    if (addr) {
-        printf("Found MIUI AVB cmdline function at 0x%08X\n", addr);
-        NOP(addr + 0xA2, 1);
     }
 
     // Keep the cmdline state selector pinned to green for normal Android boots.
@@ -207,6 +201,26 @@ void board_late_init(void) {
     // Bootmode may be finalized after platform/environment initialization.
     // Run the recovery cmdline patch here so it sees the final LK boot mode.
     patch_hos1_recovery_cmdline();
+
+    // AVB's device_state selector is pinned to locked for ordinary Android
+    // boots. In recovery/fastbootd keep the original selector so our
+    // mode-aware lock-state hook can report unlocked instead.
+    if (is_spoofing_enabled()) {
+        bootmode_t mode = get_bootmode();
+        if (mode != BOOTMODE_RECOVERY && mode != BOOTMODE_ERECOVERY &&
+            mode != BOOTMODE_FASTBOOT) {
+            uint32_t addr = SEARCH_PATTERN(LK_START, LK_END,
+                                           0xE92D, 0x4FF0, 0x4691, 0xF102);
+            if (addr) {
+                printf("Found MIUI AVB cmdline function at 0x%08X; pinning normal boot locked.\n",
+                       addr);
+                NOP(addr + 0xA2, 1);
+            }
+        } else {
+            printf("MIUI recovery/fastboot mode %d: leaving AVB device_state unlocked.\n",
+                   mode);
+        }
+    }
 
     uint32_t addr = SEARCH_PATTERN(LK_START, LK_END, 0xB530, 0xB083, 0xAB02, 0x2200);
     if (addr) {
