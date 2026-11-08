@@ -10,6 +10,20 @@
 
 static uint32_t lock_state_veneer;
 
+// Keep Android's normal boot reported as locked, but expose the real unlocked
+// state to LK fastboot so bootloader-fastboot can authorize flash operations.
+// Recovery fastbootd gets its unlocked signal from verifiedbootstate=orange in
+// the recovery cmdline, handled separately below.
+static int get_lock_state_for_bootmode(uint32_t *lock_state) {
+    if (!is_spoofing_enabled() || get_bootmode() == BOOTMODE_FASTBOOT) {
+        *lock_state = LKS_UNLOCK;
+        return 0;
+    }
+
+    *lock_state = LKS_LOCK;
+    return 0;
+}
+
 static void install_veneer(uint32_t slot, void* target) {
     WRITE32(slot, 0xC004F8DF);  // ldr.w ip, [pc, #4]
     WRITE16(slot + 4, 0x4760);  // bx ip
@@ -151,7 +165,7 @@ void board_early_init(void) {
     printf("Found MIUI ccci_ld_md_sec_ptr_hdr_verify at 0x%08X\n", addr);
     FORCE_RETURN(addr, 0);
     lock_state_veneer = addr + 4;
-    install_veneer(lock_state_veneer, (void *)get_lock_state);
+    install_veneer(lock_state_veneer, (void *)get_lock_state_for_bootmode);
     install_veneer(addr + 16, (void *)spoof_lock_state);
 
     // This printf runs after environment initialization, when get_env() is safe.
