@@ -78,23 +78,21 @@ static void spoof_lock_state(void) {
         NOP(addr + 0xA2, 1);
     }
 
-    // cmdline_pre_process cannot safely be entry-hooked: its first two halfwords
-    // are PUSH {r3,lr}; LDR r3,[pc,#0x44], both of which a PATCH_CALL would erase.
-    // Pin normal boots to green. Recovery uses orange by changing the state-0
-    // literal (green 0x000C1C5C -> orange 0x000C1BE8) only for recovery mode.
+    // Keep the cmdline state selector pinned to green for normal Android boots.
+    // For recovery/fastbootd, rewrite the green cmdline template to orange below;
+    // this avoids replacing cmdline_pre_process's PUSH/LDR prologue with a hook.
     addr = SEARCH_PATTERN(LK_START, LK_END, 0xB508, 0x4B11, 0x447B, 0x681B);
     if (addr) {
         printf("Found MIUI cmdline_pre_process at 0x%08X\n", addr);
         PATCH_MEM(addr + 0x0A, 0x2300);  // cmp r3,#3 -> movs r3,#0
-        if (get_bootmode() == BOOTMODE_RECOVERY) {
-            volatile uint32_t *literal = (volatile uint32_t *)(addr + 0x58);
-            if (*literal == 0x000C1C5C) {
-                PATCH_MEM(addr + 0x58, 0x1BE8, 0x000C);
-                printf("Recovery boot: verifiedbootstate literal set to orange.\n");
-            } else {
-                printf("Unexpected MIUI state-0 literal 0x%08X; left unchanged.\n", *literal);
-            }
-        }
+    }
+
+    // fastbootd runs from the recovery ramdisk and checks verifiedbootstate.
+    // Only rewrite the recovery cmdline templates; leave vbmeta.device_state
+    // locked because changing it can hang recovery on some devices.
+    if (get_bootmode() == BOOTMODE_RECOVERY) {
+        printf("Recovery boot detected; making fastbootd see verifiedbootstate=orange.\n");
+        handle_recovery_boot();
     }
 
     // The boot-state display uses a sibling function; pin it to green as well.
